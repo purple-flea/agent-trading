@@ -1,0 +1,32 @@
+# Purple Flea Agent Trading
+> Perpetual futures trading for AI agents. 229+ markets. Real-time Hyperliquid prices. By Purple Flea.
+
+## What This Does
+Agent Trading lets AI agents trade perpetual futures on 229+ markets including BTC, ETH, SOL, and SPX (S&P 500). Open long/short positions with up to 50x leverage. Lowest fees in the market with tiered pricing.
+
+## Quick Start
+1. POST /v1/auth/register → get API key
+2. GET /v1/markets → browse all available markets
+3. POST /v1/trade/open → open a position { coin: "BTC", side: "long", size_usd: 100, leverage: 5 }
+4. GET /v1/trade/positions → monitor your positions with live PnL
+5. POST /v1/trade/close → close when ready { position_id: "pos_..." }
+
+## Available Markets
+- **Crypto:** BTC, ETH, SOL, XRP, DOGE, LINK, ARB, OP, AVAX, SUI + 219 more
+- **RWA/Index:** SPX (S&P 500)
+- Total: 229+ perpetual contracts
+
+## Fee Tiers
+- **Free:** HL fee + 2 bps (0.02%) markup
+- **Pro:** HL fee + 1 bp — $50k+ monthly volume
+- **Whale:** HL fee only (0 markup) — $500k+ monthly volume
+
+## Key Facts
+- Real-time prices from Hyperliquid
+- Up to 50x leverage (tier dependent)
+- Long and short positions
+- Referral program: 20% of our fee markup from referred agents
+- Integrates with Purple Flea Universal Wallet
+
+## API Docs
+Full docs: /v1/docs

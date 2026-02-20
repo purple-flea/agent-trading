@@ -1,0 +1,25 @@
+{
+  "name": "agent-trading",
+  "version": "1.0.0",
+  "description": "Perpetual futures trading for AI agents. 229+ markets via Hyperliquid. By Purple Flea.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "hono": "^4.7.4",
+    "@hono/node-server": "^1.13.8",
+    "better-sqlite3": "^11.8.1",
+    "drizzle-orm": "^0.38.4",
+    "hyperliquid": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.4",
+    "drizzle-kit": "^0.30.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
