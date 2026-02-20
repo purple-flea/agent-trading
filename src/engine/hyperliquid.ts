@@ -1,10 +1,5 @@
 /**
- * Hyperliquid integration layer.
- * 
- * For now: read-only (market data, prices).
- * Phase 2: execute trades via master account + agent wallets.
- * 
- * We use the raw REST API for simplicity and to avoid SDK version issues.
+ * Hyperliquid integration — supports both main dex (229 crypto) and XYZ dex (46 RWA/stocks)
  */
 
 const HL_API = "https://api.hyperliquid.xyz";
@@ -14,120 +9,182 @@ interface MarketMeta {
   szDecimals: number;
   maxLeverage: number;
   onlyIsolated?: boolean;
+  dex: string; // "" = main, "xyz" = HIP-3
+  category?: string;
 }
 
-let cachedMeta: { markets: MarketMeta[]; timestamp: number } | null = null;
+// ─── Category classification for XYZ markets ───
+const STOCKS = ["TSLA", "NVDA", "GOOGL", "AAPL", "AMZN", "META", "MSFT", "NFLX", "AMD", "PLTR", "COIN", "MSTR", "HOOD", "INTC", "MU", "SNDK", "ORCL", "CRCL", "COST", "LLY", "TSM", "RIVN", "BABA", "SKHX", "GME", "SMSN", "SOFTBANK", "HYUNDAI", "CRWV"];
+const COMMODITIES = ["GOLD", "SILVER", "COPPER", "PLATINUM", "PALLADIUM", "URANIUM", "ALUMINIUM", "CL", "NATGAS"];
+const INDICES = ["XYZ100", "JP225", "KR200", "DXY", "SPX", "USAR", "URNM"];
+const FOREX = ["JPY", "EUR"];
 
-export async function getMarkets(): Promise<MarketMeta[]> {
-  // Cache for 60 seconds
-  if (cachedMeta && Date.now() - cachedMeta.timestamp < 60000) {
-    return cachedMeta.markets;
-  }
+function classifyMarket(name: string): string {
+  const clean = name.replace("xyz:", "");
+  if (STOCKS.includes(clean)) return "stocks";
+  if (COMMODITIES.includes(clean)) return "commodities";
+  if (INDICES.includes(clean)) return "indices";
+  if (FOREX.includes(clean)) return "forex";
+  return "crypto";
+}
 
-  const res = await fetch(`${HL_API}/info`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "meta" }),
-  });
-  const data = await res.json() as any;
-  const markets = data.universe.map((u: any) => ({
+let cachedMain: { markets: MarketMeta[]; prices: Record<string, string>; ts: number } | null = null;
+let cachedXyz: { markets: MarketMeta[]; prices: Record<string, string>; ts: number } | null = null;
+const CACHE_TTL = 30000; // 30s
+
+async function fetchDex(dex: string): Promise<{ markets: MarketMeta[]; prices: Record<string, string> }> {
+  const [metaRes, priceRes] = await Promise.all([
+    fetch(`${HL_API}/info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "meta", ...(dex ? { dex } : {}) }),
+    }),
+    fetch(`${HL_API}/info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "allMids", ...(dex ? { dex } : {}) }),
+    }),
+  ]);
+
+  const meta = await metaRes.json() as any;
+  const prices = await priceRes.json() as Record<string, string>;
+
+  const markets = meta.universe.map((u: any) => ({
     name: u.name,
     szDecimals: u.szDecimals,
     maxLeverage: u.maxLeverage,
     onlyIsolated: u.onlyIsolated,
+    dex: dex || "main",
+    category: classifyMarket(u.name),
   }));
 
-  cachedMeta = { markets, timestamp: Date.now() };
-  return markets;
+  return { markets, prices };
 }
 
+async function getMainData() {
+  if (cachedMain && Date.now() - cachedMain.ts < CACHE_TTL) return cachedMain;
+  const data = await fetchDex("");
+  cachedMain = { ...data, ts: Date.now() };
+  return cachedMain;
+}
+
+async function getXyzData() {
+  if (cachedXyz && Date.now() - cachedXyz.ts < CACHE_TTL) return cachedXyz;
+  const data = await fetchDex("xyz");
+  cachedXyz = { ...data, ts: Date.now() };
+  return cachedXyz;
+}
+
+/** Get all markets from both dexes */
+export async function getMarkets(): Promise<MarketMeta[]> {
+  const [main, xyz] = await Promise.all([getMainData(), getXyzData()]);
+  return [...main.markets, ...xyz.markets];
+}
+
+/** Get markets by category */
+export async function getMarketsByCategory(category: string): Promise<MarketMeta[]> {
+  const all = await getMarkets();
+  return all.filter(m => m.category === category);
+}
+
+/** Get all prices from both dexes */
 export async function getAllPrices(): Promise<Record<string, string>> {
-  const res = await fetch(`${HL_API}/info`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "allMids" }),
-  });
-  return await res.json() as Record<string, string>;
+  const [main, xyz] = await Promise.all([getMainData(), getXyzData()]);
+  return { ...main.prices, ...xyz.prices };
 }
 
+/** Get price for a specific coin (handles xyz: prefix automatically) */
 export async function getPrice(coin: string): Promise<number | null> {
   const prices = await getAllPrices();
-  const p = prices[coin];
-  return p ? parseFloat(p) : null;
+
+  // Try exact match first
+  if (prices[coin]) return parseFloat(prices[coin]);
+
+  // Try with xyz: prefix (for RWA markets)
+  if (prices[`xyz:${coin}`]) return parseFloat(prices[`xyz:${coin}`]);
+
+  // Try without xyz: prefix
+  const clean = coin.replace("xyz:", "");
+  if (prices[clean]) return parseFloat(prices[clean]);
+
+  return null;
 }
 
-export async function getMarketByName(coin: string): Promise<MarketMeta | undefined> {
-  const markets = await getMarkets();
-  return markets.find(m => m.name.toUpperCase() === coin.toUpperCase());
+/** Resolve a coin name to its canonical form */
+export async function resolveCoin(coin: string): Promise<{ canonical: string; dex: string; market: MarketMeta } | null> {
+  const all = await getMarkets();
+  const upper = coin.toUpperCase();
+
+  // Exact match
+  let found = all.find(m => m.name.toUpperCase() === upper);
+  if (found) return { canonical: found.name, dex: found.dex, market: found };
+
+  // Try with xyz: prefix
+  found = all.find(m => m.name.toUpperCase() === `XYZ:${upper}`);
+  if (found) return { canonical: found.name, dex: found.dex, market: found };
+
+  // Try without prefix
+  const clean = upper.replace("XYZ:", "");
+  found = all.find(m => m.name.toUpperCase() === clean || m.name.toUpperCase() === `XYZ:${clean}`);
+  if (found) return { canonical: found.name, dex: found.dex, market: found };
+
+  return null;
 }
 
-/**
- * Fee structure for our service:
- * - We add a markup on top of Hyperliquid's fees
- * - HL taker fee: 0.035%, HL maker fee: 0.01%
- * - Our markup: 0.02% (2 bps) for free tier, 0.01% for pro, 0% for whale
- * - This is our revenue from trading
- */
+/** Fee structure */
 export function calculateFee(sizeUsd: number, tier: string): { hlFee: number; ourFee: number; totalFee: number } {
-  const hlFeeRate = 0.00035; // taker fee
-  const ourFeeRates: Record<string, number> = {
-    free: 0.0002,  // 2 bps
-    pro: 0.0001,   // 1 bp
-    whale: 0,      // 0 bps
-  };
+  const hlFeeRate = 0.00035;
+  const ourFeeRates: Record<string, number> = { free: 0.0002, pro: 0.0001, whale: 0 };
   const ourRate = ourFeeRates[tier] ?? 0.0002;
-  const hlFee = round2(sizeUsd * hlFeeRate);
-  const ourFee = round2(sizeUsd * ourRate);
-  return { hlFee, ourFee, totalFee: round2(hlFee + ourFee) };
+  return {
+    hlFee: round2(sizeUsd * hlFeeRate),
+    ourFee: round2(sizeUsd * ourRate),
+    totalFee: round2(sizeUsd * (hlFeeRate + ourRate)),
+  };
 }
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
-
-/**
- * Simulate a market order fill (Phase 1 — paper trading with real prices).
- * Phase 2 will actually execute on Hyperliquid.
- */
+/** Simulate a market order fill with real prices */
 export async function simulateMarketOrder(coin: string, side: "buy" | "sell", sizeUsd: number, leverage: number) {
-  const price = await getPrice(coin);
-  if (!price) throw new Error(`No price found for ${coin}`);
+  const resolved = await resolveCoin(coin);
+  if (!resolved) throw new Error(`Market not found: ${coin}. Try GET /v1/markets to see available markets.`);
 
-  const market = await getMarketByName(coin);
-  if (!market) throw new Error(`Market ${coin} not found`);
+  const { canonical, market } = resolved;
+  const price = await getPrice(canonical);
+  if (!price) throw new Error(`No price available for ${canonical}`);
 
   if (leverage > market.maxLeverage) {
-    throw new Error(`Max leverage for ${coin} is ${market.maxLeverage}x`);
+    throw new Error(`Max leverage for ${canonical} is ${market.maxLeverage}x`);
   }
 
   const marginRequired = round2(sizeUsd / leverage);
-  const sizeInCoin = sizeUsd / price;
+  const sizeInAsset = sizeUsd / price;
 
-  // Simulate slippage (0.01% for small orders, up to 0.1% for large)
   const slippageBps = Math.min(0.001, 0.0001 * Math.log10(sizeUsd / 100 + 1));
   const fillPrice = side === "buy"
     ? round8(price * (1 + slippageBps))
     : round8(price * (1 - slippageBps));
 
-  // Estimate liquidation price
   const liqDistance = 1 / leverage;
   const liquidationPrice = side === "buy"
-    ? round8(fillPrice * (1 - liqDistance + 0.005)) // 0.5% maintenance margin
+    ? round8(fillPrice * (1 - liqDistance + 0.005))
     : round8(fillPrice * (1 + liqDistance - 0.005));
 
   return {
-    coin,
+    coin: canonical,
+    displayName: canonical.replace("xyz:", ""),
+    dex: resolved.dex,
+    category: market.category,
     side,
     sizeUsd,
-    sizeInCoin: round8(sizeInCoin),
+    sizeInAsset: round8(sizeInAsset),
     fillPrice,
     leverage,
     marginRequired,
     liquidationPrice,
     currentPrice: price,
+    maxLeverage: market.maxLeverage,
   };
 }
 
-function round8(n: number): number {
-  return Math.round(n * 100000000) / 100000000;
-}
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+function round8(n: number): number { return Math.round(n * 100000000) / 100000000; }

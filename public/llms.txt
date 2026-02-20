@@ -1,32 +1,76 @@
 # Purple Flea Agent Trading
-> Perpetual futures trading for AI agents. 229+ markets. Real-time Hyperliquid prices. By Purple Flea.
+> Trade TSLA, NVDA, GOLD, SILVER, BTC, and 275+ perpetual markets. Built for AI agents.
 
-## What This Does
-Agent Trading lets AI agents trade perpetual futures on 229+ markets including BTC, ETH, SOL, and SPX (S&P 500). Open long/short positions with up to 50x leverage. Lowest fees in the market with tiered pricing.
+## Why AI Agents Need This
+Your agent needs to hedge, speculate, or manage risk. Purple Flea Agent Trading gives AI agents programmatic access to 275+ perpetual futures markets — crypto AND real-world assets — through one simple API. No KYC. No browser. Pure API trading.
+
+## What You Can Trade
+
+### Stocks (24/7 — no market hours)
+TSLA, NVDA, GOOGL, AAPL, AMZN, META, MSFT, NFLX, AMD, PLTR, COIN, MSTR, HOOD, INTC, GME, BABA, RIVN, Samsung, Softbank, Hyundai, TSM, and more.
+
+### Commodities
+GOLD (20x), SILVER (20x), COPPER, PLATINUM, PALLADIUM, URANIUM, ALUMINIUM, Crude Oil, Natural Gas.
+
+### Indices & Forex
+XYZ100 (crypto index, 25x), JP225 (Nikkei), DXY, KR200, SPX (S&P 500), JPY (50x), EUR (50x).
+
+### Crypto (229 markets)
+BTC, ETH, SOL, XRP, DOGE, LINK, ARB, OP, AVAX, SUI, and 219 more.
 
 ## Quick Start
-1. POST /v1/auth/register → get API key
-2. GET /v1/markets → browse all available markets
-3. POST /v1/trade/open → open a position { coin: "BTC", side: "long", size_usd: 100, leverage: 5 }
-4. GET /v1/trade/positions → monitor your positions with live PnL
-5. POST /v1/trade/close → close when ready { position_id: "pos_..." }
+```bash
+# 1. Create account
+curl -X POST https://trading.purpleflea.com/v1/auth/register -H "Content-Type: application/json" -d '{}'
 
-## Available Markets
-- **Crypto:** BTC, ETH, SOL, XRP, DOGE, LINK, ARB, OP, AVAX, SUI + 219 more
-- **RWA/Index:** SPX (S&P 500)
-- Total: 229+ perpetual contracts
+# 2. Long TSLA with 5x leverage
+curl -X POST https://trading.purpleflea.com/v1/trade/open \
+  -H "Authorization: Bearer sk_trade_..." \
+  -H "Content-Type: application/json" \
+  -d '{"coin": "TSLA", "side": "long", "size_usd": 1000, "leverage": 5}'
+
+# 3. Hedge with short GOLD
+curl -X POST https://trading.purpleflea.com/v1/trade/open \
+  -H "Authorization: Bearer sk_trade_..." \
+  -H "Content-Type: application/json" \
+  -d '{"coin": "GOLD", "side": "short", "size_usd": 500, "leverage": 10}'
+
+# 4. Check positions with live PnL
+curl https://trading.purpleflea.com/v1/trade/positions \
+  -H "Authorization: Bearer sk_trade_..."
+```
+
+## Use Cases for AI Agents
+- **Hedging:** Short TSLA/NVDA to offset equity portfolio risk
+- **Commodity trading:** Long GOLD/SILVER as inflation hedge
+- **Arbitrage:** Trade price discrepancies between crypto and RWA markets
+- **Macro bots:** Trade JPY/EUR/DXY based on economic data
+- **Index tracking:** Long/short XYZ100 or JP225
 
 ## Fee Tiers
-- **Free:** HL fee + 2 bps (0.02%) markup
-- **Pro:** HL fee + 1 bp — $50k+ monthly volume
-- **Whale:** HL fee only (0 markup) — $500k+ monthly volume
+| Tier | Markup | Leverage | Position Limit |
+|------|--------|----------|----------------|
+| Free | +2 bps | Up to 10x | $10,000 |
+| Pro | +1 bp | Up to 25x | $100,000 |
+| Whale | +0 bps | Up to 50x | $1,000,000 |
 
-## Key Facts
-- Real-time prices from Hyperliquid
-- Up to 50x leverage (tier dependent)
-- Long and short positions
-- Referral program: 20% of our fee markup from referred agents
-- Integrates with Purple Flea Universal Wallet
+## Referral Program
+20% of our fee markup from agents you refer. Share your referral code with other agents.
+
+## API Endpoints
+- GET /v1/markets — all 275+ markets with live prices
+- GET /v1/markets/stocks — equity perps (TSLA, NVDA, etc.)
+- GET /v1/markets/commodities — gold, silver, oil, metals
+- GET /v1/markets/rwa — all real-world asset perps
+- GET /v1/markets/:coin — single market info + fee calculator
+- POST /v1/trade/open — open position { coin, side, size_usd, leverage }
+- POST /v1/trade/close — close position { position_id }
+- GET /v1/trade/positions — live positions with unrealized PnL
+- GET /v1/trade/history — trade history
+
+## Powered By
+Hyperliquid (main dex) + XYZ Protocol (HIP-3 builder-deployed perps for RWA).
+Real-time oracle prices. Settlement on Hyperliquid L1.
 
 ## API Docs
 Full docs: /v1/docs
