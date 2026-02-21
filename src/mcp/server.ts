@@ -26,7 +26,7 @@ async function api(method: string, path: string, body?: unknown) {
 
 const server = new McpServer({
   name: "agent-trading",
-  version: "2.0.0",
+  version: "3.0.0",
 });
 
 // ─── trading_list_markets ───
@@ -94,7 +94,7 @@ server.tool(
 
 server.tool(
   "trading_open_position",
-  "Open a leveraged long or short position on any of 275+ markets. Supports stocks (TSLA 5x), commodities (GOLD 10x), crypto (BTC 50x). Fees: Hyperliquid base + 2 bps. Referral agents earn 20% commission on fees from referred traders.",
+  "Open a REAL leveraged long or short position on Hyperliquid. Supports stocks (TSLA 5x), commodities (GOLD 10x), crypto (BTC 50x). Orders execute directly on YOUR HL account. Fees: Hyperliquid base + builder fee (2 bps free tier). Referral agents earn 20% commission.",
   {
     coin: z
       .string()
@@ -127,7 +127,7 @@ server.tool(
 
 server.tool(
   "trading_close_position",
-  "Close an open position and realize profit/loss. Returns entry price, exit price, P&L in USD and percentage, and fees paid.",
+  "Close an open position on Hyperliquid and realize profit/loss. Submits a reduce-only market order. Returns entry price, exit price, P&L in USD and percentage, and fees paid.",
   {
     position_id: z
       .string()
@@ -146,7 +146,7 @@ server.tool(
 
 server.tool(
   "trading_get_positions",
-  "View all your open trading positions with live prices and unrealized P&L. Optionally include closed/liquidated positions.",
+  "View your real Hyperliquid positions with live prices and unrealized P&L. Reads directly from HL clearinghouse. Optionally include closed positions from history.",
   {
     status: z
       .enum(["open", "all"])
@@ -200,8 +200,16 @@ server.tool(
 
 server.tool(
   "trading_register",
-  "Create a new trading account. Returns API key for authenticated trading. Optional: provide a referral code to link to a referring agent (they earn 20% commission on your fees, you get priority support).",
+  "Create a new trading account with real Hyperliquid execution. Provide your HL wallet address and signing key (API Agent Wallet private key) for live trading. Trades execute on YOUR Hyperliquid account — we never hold your funds. Sign up via https://app.hyperliquid.xyz/join/PF for referral benefits.",
   {
+    hl_wallet_address: z
+      .string()
+      .optional()
+      .describe("Your Hyperliquid wallet address (0x...). Required for real trading."),
+    hl_signing_key: z
+      .string()
+      .optional()
+      .describe("Your HL API Agent Wallet private key (0x...) for automated execution. Create one in HL settings. NEVER share your main wallet key."),
     referral_code: z
       .string()
       .optional()
@@ -211,8 +219,8 @@ server.tool(
       .optional()
       .describe("Link to an existing wallet/casino agent ID for unified identity."),
   },
-  async ({ referral_code, wallet_agent_id }) => {
-    const result = await api("POST", "/auth/register", { referral_code, wallet_agent_id });
+  async ({ hl_wallet_address, hl_signing_key, referral_code, wallet_agent_id }) => {
+    const result = await api("POST", "/auth/register", { hl_wallet_address, hl_signing_key, referral_code, wallet_agent_id });
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   },
 );

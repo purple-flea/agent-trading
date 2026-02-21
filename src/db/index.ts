@@ -13,7 +13,10 @@ export const db = drizzle(sqlite, { schema });
 const migrations = `
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY, api_key_hash TEXT UNIQUE NOT NULL,
-  wallet_agent_id TEXT, max_leverage INTEGER NOT NULL DEFAULT 10,
+  wallet_agent_id TEXT,
+  hl_wallet_address TEXT, hl_signing_key_encrypted TEXT,
+  builder_approved INTEGER NOT NULL DEFAULT 0,
+  max_leverage INTEGER NOT NULL DEFAULT 10,
   max_position_usd REAL NOT NULL DEFAULT 10000,
   total_volume REAL NOT NULL DEFAULT 0, total_fees_paid REAL NOT NULL DEFAULT 0,
   total_pnl REAL NOT NULL DEFAULT 0, referral_code TEXT UNIQUE NOT NULL,
@@ -57,6 +60,17 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
 `;
 
+// Incremental migrations for existing databases
+const alterMigrations = [
+  "ALTER TABLE agents ADD COLUMN hl_wallet_address TEXT",
+  "ALTER TABLE agents ADD COLUMN hl_signing_key_encrypted TEXT",
+  "ALTER TABLE agents ADD COLUMN builder_approved INTEGER NOT NULL DEFAULT 0",
+];
+
 export function runMigrations() {
   sqlite.exec(migrations);
+  // Run ALTER TABLE migrations (silently ignore if columns already exist)
+  for (const sql of alterMigrations) {
+    try { sqlite.exec(sql); } catch {}
+  }
 }

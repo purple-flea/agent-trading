@@ -1,6 +1,6 @@
 {
   "name": "@purpleflea/trading-mcp",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "MCP server for AI agent trading — 275+ perpetual markets including TSLA, NVDA, GOLD, SILVER via Hyperliquid HIP-3. Stocks, commodities, crypto, forex. By Purple Flea.",
   "type": "module",
   "main": "dist/server.js",

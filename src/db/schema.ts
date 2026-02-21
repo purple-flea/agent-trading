@@ -4,6 +4,9 @@ export const agents = sqliteTable("agents", {
   id: text("id").primaryKey(),
   apiKeyHash: text("api_key_hash").unique().notNull(),
   walletAgentId: text("wallet_agent_id"), // linked universal wallet agent
+  hlWalletAddress: text("hl_wallet_address"), // Hyperliquid wallet address (for real execution)
+  hlSigningKeyEncrypted: text("hl_signing_key_encrypted"), // AES-256-GCM encrypted signing key
+  builderApproved: integer("builder_approved").default(0).notNull(), // 1 if builder fee approved on HL
   maxLeverage: integer("max_leverage").default(10).notNull(),
   maxPositionUsd: real("max_position_usd").default(10000).notNull(),
   totalVolume: real("total_volume").default(0).notNull(),

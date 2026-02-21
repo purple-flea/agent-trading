@@ -18,12 +18,13 @@ app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
 app.use("/.well-known/llms.txt", serveStatic({ path: "public/llms.txt" }));
 
-app.get("/health", (c) => c.json({ status: "ok", service: "agent-trading", version: "2.0.0" }));
+app.get("/health", (c) => c.json({ status: "ok", service: "agent-trading", version: "3.0.0", execution: "real" }));
 
 app.get("/", (c) => c.json({
   service: "Purple Flea Agent Trading",
-  version: "2.0.0",
-  tagline: "Trade TSLA, NVDA, GOLD, SILVER, BTC and 275+ markets. Built for AI agents.",
+  version: "3.0.0",
+  tagline: "REAL execution on Hyperliquid. Trade TSLA, NVDA, GOLD, SILVER, BTC and 275+ markets. Built for AI agents.",
+  execution: "real — orders execute directly on Hyperliquid via your wallet",
   total_markets: "275+",
   categories: {
     stocks: "TSLA, NVDA, GOOGL, AAPL, AMZN, META, MSFT, NFLX, AMD, PLTR, COIN, GME + more",
@@ -33,6 +34,7 @@ app.get("/", (c) => c.json({
     crypto: "229 perpetual contracts (BTC, ETH, SOL, XRP, DOGE + 224 more)",
   },
   powered_by: "Hyperliquid + XYZ Protocol (HIP-3)",
+  onboarding: "Sign up at https://app.hyperliquid.xyz/join/PF — deposit USDC — register with your wallet",
   docs: "/v1/docs",
   llms: "/llms.txt",
   for_ai_agents: true,
@@ -44,9 +46,10 @@ v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
 
 v1.get("/docs", (c) => c.json({
+  version: "3.0.0 — Real Hyperliquid Execution",
   auth: {
-    "POST /v1/auth/register": "Create trading account",
-    "GET /v1/auth/account": "Account info, tier, stats",
+    "POST /v1/auth/register": "Create account { hl_wallet_address, hl_signing_key, referral_code? }",
+    "GET /v1/auth/account": "Account info, tier, wallet status",
   },
   markets: {
     "GET /v1/markets": "All 275+ markets with live prices (crypto + stocks + commodities + forex)",
@@ -57,10 +60,16 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/markets/:coin/price": "Current price",
   },
   trading: {
-    "POST /v1/trade/open": "Open position { coin: 'TSLA', side: 'long', size_usd: 1000, leverage: 5 }",
-    "POST /v1/trade/close": "Close position { position_id }",
-    "GET /v1/trade/positions": "Open positions with live PnL",
+    "POST /v1/trade/open": "Open REAL position { coin: 'TSLA', side: 'long', size_usd: 1000, leverage: 5 }",
+    "POST /v1/trade/close": "Close REAL position { position_id }",
+    "GET /v1/trade/positions": "Real positions from Hyperliquid clearinghouse",
     "GET /v1/trade/history": "Trade history",
+  },
+  setup: {
+    step_1: "Sign up at https://app.hyperliquid.xyz/join/PF",
+    step_2: "Deposit USDC to your Hyperliquid account",
+    step_3: "Create API Agent Wallet in HL settings",
+    step_4: "POST /v1/auth/register with hl_wallet_address + hl_signing_key",
   },
   examples: {
     long_tesla: { coin: "TSLA", side: "long", size_usd: 1000, leverage: 5 },
