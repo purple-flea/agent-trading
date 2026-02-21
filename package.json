@@ -1,19 +1,60 @@
 {
-  "name": "agent-trading",
-  "version": "1.0.0",
-  "description": "Perpetual futures trading for AI agents. 229+ markets via Hyperliquid. By Purple Flea.",
+  "name": "@purpleflea/trading-mcp",
+  "version": "2.0.0",
+  "description": "MCP server for AI agent trading — 275+ perpetual markets including TSLA, NVDA, GOLD, SILVER via Hyperliquid HIP-3. Stocks, commodities, crypto, forex. By Purple Flea.",
   "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "trading-mcp": "./dist/mcp/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agent",
+    "trading",
+    "perpetual-futures",
+    "stocks",
+    "commodities",
+    "gold",
+    "silver",
+    "tesla",
+    "nvidia",
+    "hyperliquid",
+    "defi",
+    "crypto",
+    "claude",
+    "openai",
+    "purple-flea",
+    "leverage",
+    "forex"
+  ],
+  "author": "Purple Flea",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/purple-flea/agent-trading.git"
+  },
+  "homepage": "https://github.com/purple-flea/agent-trading",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "mcp": "tsx src/mcp/server.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "hono": "^4.7.4",
     "@hono/node-server": "^1.13.8",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^11.8.1",
     "drizzle-orm": "^0.38.4",
-    "hyperliquid": "^1.5.4"
+    "hono": "^4.7.4",
+    "hyperliquid": "^1.5.4",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
