@@ -7,6 +7,7 @@ import { runMigrations } from "./db/index.js";
 import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
+import referralRoutes from "./routes/referral.js";
 
 runMigrations();
 
@@ -44,6 +45,7 @@ const v1 = new Hono();
 v1.route("/auth", authRoutes);
 v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
+v1.route("/referral", referralRoutes);
 
 v1.get("/docs", (c) => c.json({
   version: "3.0.0 — Real Hyperliquid Execution",
