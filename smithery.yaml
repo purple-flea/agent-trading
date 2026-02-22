@@ -1,0 +1,12 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      apiKey:
+        type: string
+        description: "Purple Flea Trading API key (get one at api.purpleflea.com)"
+    required: []
+  commandFunction:
+    - node
+    - dist/mcp/server.js
