@@ -232,6 +232,18 @@ app.post("/close", async (c) => {
       lastActive: Math.floor(Date.now() / 1000),
     }).where(eq(schema.agents.id, agentId)).run();
 
+    // Referral commission on close (20% of our fee markup)
+    if (agent.referredBy && fees.ourFee > 0) {
+      const commission = round2(fees.ourFee * 0.20);
+      if (commission >= 0.01) {
+        db.insert(schema.referralEarnings).values({
+          id: `ref_${randomUUID()}`,
+          referrerId: agent.referredBy, referredId: agentId,
+          feeAmount: fees.ourFee, commissionAmount: commission, orderId,
+        }).run();
+      }
+    }
+
     return c.json({
       position_id,
       coin: position.coin,
