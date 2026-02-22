@@ -12,7 +12,8 @@ import referralRoutes from "./routes/referral.js";
 runMigrations();
 
 const app = new Hono();
-app.use("*", cors());
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["*"];
+app.use("*", cors({ origin: ALLOWED_ORIGINS }));
 app.use("*", logger());
 
 app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));

@@ -86,7 +86,7 @@ app.post("/open", async (c) => {
     const fees = calculateFee(fill.sizeUsd, agent.tier);
 
     // Record in our DB for tracking
-    const orderId = `ord_${randomUUID().slice(0, 8)}`;
+    const orderId = `ord_${randomUUID()}`;
     db.insert(schema.orders).values({
       id: orderId, agentId, coin: fill.coin, side: buySide,
       orderType: "market", sizeUsd: fill.sizeUsd, leverage: lev,
@@ -94,7 +94,7 @@ app.post("/open", async (c) => {
       hlOrderId: String(fill.hlOrderId),
     }).run();
 
-    const posId = `pos_${randomUUID().slice(0, 8)}`;
+    const posId = `pos_${randomUUID()}`;
     db.insert(schema.positions).values({
       id: posId, agentId, coin: fill.coin, side,
       sizeUsd: fill.sizeUsd, entryPrice: fill.avgPrice, leverage: lev,
@@ -105,7 +105,7 @@ app.post("/open", async (c) => {
 
     db.update(schema.orders).set({ positionId: posId }).where(eq(schema.orders.id, orderId)).run();
 
-    const tradeId = `trd_${randomUUID().slice(0, 8)}`;
+    const tradeId = `trd_${randomUUID()}`;
     db.insert(schema.trades).values({
       id: tradeId, agentId, orderId, coin: fill.coin,
       side: buySide, sizeUsd: fill.sizeUsd, price: fill.avgPrice, fee: fees.totalFee,
@@ -122,7 +122,7 @@ app.post("/open", async (c) => {
       const commission = round2(fees.ourFee * 0.20);
       if (commission >= 0.01) {
         db.insert(schema.referralEarnings).values({
-          id: `ref_${randomUUID().slice(0, 8)}`,
+          id: `ref_${randomUUID()}`,
           referrerId: agent.referredBy, referredId: agentId,
           feeAmount: fees.ourFee, commissionAmount: commission, orderId,
         }).run();
@@ -203,7 +203,7 @@ app.post("/close", async (c) => {
     }).where(eq(schema.positions.id, position_id)).run();
 
     const closeSide = position.side === "long" ? "sell" : "buy";
-    const orderId = `ord_${randomUUID().slice(0, 8)}`;
+    const orderId = `ord_${randomUUID()}`;
     db.insert(schema.orders).values({
       id: orderId, agentId, coin: position.coin, side: closeSide,
       orderType: "market", sizeUsd: position.sizeUsd, leverage: position.leverage,
@@ -212,7 +212,7 @@ app.post("/close", async (c) => {
     }).run();
 
     db.insert(schema.trades).values({
-      id: `trd_${randomUUID().slice(0, 8)}`, agentId, orderId,
+      id: `trd_${randomUUID()}`, agentId, orderId,
       coin: position.coin, side: closeSide, sizeUsd: position.sizeUsd,
       price: currentPrice, fee: fees.totalFee, realizedPnl: leveragedPnl,
     }).run();
@@ -346,7 +346,7 @@ app.get("/positions", async (c) => {
 // GET /history
 app.get("/history", (c) => {
   const agentId = c.get("agentId") as string;
-  const limit = parseInt(c.req.query("limit") ?? "50");
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "50") || 50, 200);
   const trades = db.select().from(schema.trades)
     .where(eq(schema.trades.agentId, agentId))
     .orderBy(desc(schema.trades.createdAt)).limit(limit).all();
