@@ -6,7 +6,7 @@ import * as schema from "./schema.js";
 mkdirSync("data", { recursive: true });
 export const sqlite: import("better-sqlite3").Database = new Database("data/trading.db");
 sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("busy_timeout = 5000");
+sqlite.pragma("busy_timeout = 30000");
 
 export const db = drizzle(sqlite, { schema });
 
@@ -58,6 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_positions_coin ON positions(coin);
 CREATE INDEX IF NOT EXISTS idx_orders_agent ON orders(agent_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
+CREATE INDEX IF NOT EXISTS idx_positions_agent_status ON positions(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_trades_agent_created ON trades(agent_id, created_at);
 `;
 
 // Incremental migrations for existing databases
@@ -74,3 +76,16 @@ export function runMigrations() {
     try { sqlite.exec(sql); } catch {}
   }
 }
+
+// Auto-migration for referral_withdrawals
+try {
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS referral_withdrawals (
+    id TEXT PRIMARY KEY,
+    referrer_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    address TEXT NOT NULL,
+    tx_hash TEXT,
+    status TEXT NOT NULL DEFAULT "pending",
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )`);
+} catch {}

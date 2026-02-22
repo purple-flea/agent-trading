@@ -85,3 +85,13 @@ export const referralEarnings = sqliteTable("referral_earnings", {
   orderId: text("order_id"),
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
 });
+
+export const referralWithdrawals = sqliteTable("referral_withdrawals", {
+  id: text("id").primaryKey(),
+  referrerId: text("referrer_id").notNull(),
+  amount: real("amount").notNull(),
+  address: text("address").notNull(),
+  txHash: text("tx_hash"),
+  status: text("status").default("pending").notNull(),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+});

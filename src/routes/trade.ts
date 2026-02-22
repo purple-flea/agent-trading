@@ -52,6 +52,14 @@ app.post("/open", async (c) => {
     }, 400);
   }
 
+  if (typeof size_usd !== "number" || !Number.isFinite(size_usd) || size_usd <= 0) {
+    return c.json({ error: "invalid_size", message: "size_usd must be a positive number" }, 400);
+  }
+
+  if (side !== "long" && side !== "short") {
+    return c.json({ error: "invalid_side", message: "side must be 'long' or 'short'" }, 400);
+  }
+
   const lev = Math.min(leverage ?? 5, agent.maxLeverage);
   if (size_usd > agent.maxPositionUsd) {
     return c.json({
