@@ -10,10 +10,11 @@ import type { AppEnv } from "../types.js";
 
 const app = new Hono<AppEnv>();
 
-// Auth required for all routes except leaderboard
+// Auth required for all routes except leaderboard and leader stats
 app.use("/follow/*", agentAuth);
 app.use("/following", agentAuth);
 app.use("/followers", agentAuth);
+app.use("/my-leader-stats", agentAuth);
 
 function round2(n: number) { return Math.round(n * 100) / 100; }
 
@@ -189,6 +190,258 @@ app.get("/followers", (c) => {
     })),
     total_followers: subs.length,
     total_allocated_usdc: round2(totalAllocated),
+  });
+});
+
+// ─── GET /copy/leader/:leader_id/stats — public leader performance profile ───
+
+app.get("/leader/:leader_id/stats", (c) => {
+  const leaderId = c.req.param("leader_id");
+  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
+  const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
+
+  const leader = db.select({
+    id: schema.agents.id,
+    tier: schema.agents.tier,
+    totalVolume: schema.agents.totalVolume,
+    totalPnl: schema.agents.totalPnl,
+    createdAt: schema.agents.createdAt,
+  }).from(schema.agents).where(eq(schema.agents.id, leaderId)).get();
+
+  if (!leader) return c.json({ error: "leader_not_found" }, 404);
+
+  // 30d trade stats
+  const stats30d = db.select({
+    totalPnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl}), 0)`,
+    totalVolume: sql<number>`COALESCE(SUM(${schema.trades.sizeUsd}), 0)`,
+    totalFees: sql<number>`COALESCE(SUM(${schema.trades.fee}), 0)`,
+    tradeCount: sql<number>`COUNT(*)`,
+    winCount: sql<number>`SUM(CASE WHEN ${schema.trades.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, leaderId),
+      sql`${schema.trades.createdAt} >= ${thirtyDaysAgo}`,
+    )).get();
+
+  // 7d trade stats
+  const stats7d = db.select({
+    totalPnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl}), 0)`,
+    tradeCount: sql<number>`COUNT(*)`,
+    winCount: sql<number>`SUM(CASE WHEN ${schema.trades.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, leaderId),
+      sql`${schema.trades.createdAt} >= ${sevenDaysAgo}`,
+    )).get();
+
+  // Per-coin breakdown (30d)
+  const coinStats = db.select({
+    coin: schema.trades.coin,
+    pnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl}), 0)`,
+    volume: sql<number>`COALESCE(SUM(${schema.trades.sizeUsd}), 0)`,
+    trades: sql<number>`COUNT(*)`,
+    wins: sql<number>`SUM(CASE WHEN ${schema.trades.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, leaderId),
+      sql`${schema.trades.createdAt} >= ${thirtyDaysAgo}`,
+    ))
+    .groupBy(schema.trades.coin)
+    .orderBy(desc(sql`COALESCE(SUM(${schema.trades.realizedPnl}), 0)`))
+    .limit(5)
+    .all();
+
+  // Best and worst single trade (30d)
+  const bestTrade = db.select({
+    coin: schema.trades.coin,
+    pnl: schema.trades.realizedPnl,
+    size: schema.trades.sizeUsd,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, leaderId),
+      sql`${schema.trades.createdAt} >= ${thirtyDaysAgo}`,
+    ))
+    .orderBy(desc(schema.trades.realizedPnl))
+    .limit(1).get();
+
+  const worstTrade = db.select({
+    coin: schema.trades.coin,
+    pnl: schema.trades.realizedPnl,
+    size: schema.trades.sizeUsd,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, leaderId),
+      sql`${schema.trades.createdAt} >= ${thirtyDaysAgo}`,
+    ))
+    .orderBy(schema.trades.realizedPnl)
+    .limit(1).get();
+
+  // Current followers
+  const followerStats = db.select({
+    count: sql<number>`COUNT(*)`,
+    totalAllocated: sql<number>`COALESCE(SUM(${schema.copySubscriptions.allocationUsdc}), 0)`,
+  }).from(schema.copySubscriptions)
+    .where(and(
+      eq(schema.copySubscriptions.leaderId, leaderId),
+      eq(schema.copySubscriptions.active, 1),
+    )).get();
+
+  // Commission earned from copy followers (30d)
+  const commissionEarned30d = db.select({
+    total: sql<number>`COALESCE(SUM(${schema.referralEarnings.commissionAmount}), 0)`,
+    count: sql<number>`COUNT(*)`,
+  }).from(schema.referralEarnings)
+    .where(and(
+      eq(schema.referralEarnings.referrerId, leaderId),
+      sql`${schema.referralEarnings.createdAt} >= ${thirtyDaysAgo}`,
+    )).get();
+
+  const pnl30d = round2(stats30d?.totalPnl ?? 0);
+  const vol30d = round2(stats30d?.totalVolume ?? 0);
+  const trades30d = stats30d?.tradeCount ?? 0;
+  const wins30d = stats30d?.winCount ?? 0;
+  const winRate30d = trades30d > 0 ? round2((wins30d / trades30d) * 100) : 0;
+  const pnlPct30d = vol30d > 0 ? round2((pnl30d / vol30d) * 100) : 0;
+
+  const pnl7d = round2(stats7d?.totalPnl ?? 0);
+  const trades7d = stats7d?.tradeCount ?? 0;
+  const wins7d = stats7d?.winCount ?? 0;
+  const winRate7d = trades7d > 0 ? round2((wins7d / trades7d) * 100) : 0;
+
+  return c.json({
+    leader_id: leaderId,
+    tier: leader.tier,
+    member_since: leader.createdAt,
+    performance: {
+      "7d": {
+        pnl_usd: pnl7d,
+        trade_count: trades7d,
+        win_rate_pct: winRate7d,
+      },
+      "30d": {
+        pnl_usd: pnl30d,
+        pnl_return_pct: pnlPct30d,
+        volume_usd: vol30d,
+        trade_count: trades30d,
+        win_rate_pct: winRate30d,
+        fees_paid: round2(stats30d?.totalFees ?? 0),
+        net_pnl_after_fees: round2(pnl30d - (stats30d?.totalFees ?? 0)),
+      },
+      all_time: {
+        total_pnl_usd: round2(leader.totalPnl),
+        total_volume_usd: round2(leader.totalVolume),
+      },
+    },
+    top_coins_30d: coinStats.map(c => ({
+      coin: c.coin,
+      pnl_usd: round2(c.pnl),
+      volume_usd: round2(c.volume),
+      trades: c.trades,
+      win_rate_pct: c.trades > 0 ? round2((c.wins / c.trades) * 100) : 0,
+    })),
+    best_trade_30d: bestTrade ? { coin: bestTrade.coin, pnl_usd: round2(bestTrade.pnl), size_usd: round2(bestTrade.size) } : null,
+    worst_trade_30d: worstTrade ? { coin: worstTrade.coin, pnl_usd: round2(worstTrade.pnl), size_usd: round2(worstTrade.size) } : null,
+    copy_stats: {
+      active_followers: followerStats?.count ?? 0,
+      total_allocated_usdc: round2(followerStats?.totalAllocated ?? 0),
+      commission_earned_30d: round2(commissionEarned30d?.total ?? 0),
+      commission_trades_30d: commissionEarned30d?.count ?? 0,
+      commission_rate_pct: 20,
+    },
+    copy_tip: (followerStats?.count ?? 0) === 0
+      ? "No followers yet. Strong 30d performance is the best way to attract copy traders."
+      : `You have ${followerStats?.count} follower(s) with $${round2(followerStats?.totalAllocated ?? 0)} allocated. Keep your win rate above 55% to retain followers.`,
+  }, 200, { "Cache-Control": "public, max-age=60" });
+});
+
+// ─── GET /copy/my-leader-stats — auth required, same data for self ───
+
+app.get("/my-leader-stats", (c) => {
+  const leaderId = c.get("agentId") as string;
+  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
+
+  // Active followers detail
+  const followers = db.select({
+    followerId: schema.copySubscriptions.followerId,
+    allocationUsdc: schema.copySubscriptions.allocationUsdc,
+    maxPositionSize: schema.copySubscriptions.maxPositionSize,
+    stopLossPct: schema.copySubscriptions.stopLossPct,
+    since: schema.copySubscriptions.createdAt,
+  }).from(schema.copySubscriptions)
+    .where(and(
+      eq(schema.copySubscriptions.leaderId, leaderId),
+      eq(schema.copySubscriptions.active, 1),
+    )).all();
+
+  const totalAllocated = followers.reduce((s, f) => s + f.allocationUsdc, 0);
+
+  // Open copy positions being mirrored right now
+  const openCopyCount = db.select({ count: sql<number>`COUNT(*)` })
+    .from(schema.copyTrades)
+    .innerJoin(schema.copySubscriptions, eq(schema.copyTrades.subscriptionId, schema.copySubscriptions.id))
+    .where(and(
+      eq(schema.copySubscriptions.leaderId, leaderId),
+      eq(schema.copyTrades.status, "open"),
+    )).get()?.count ?? 0;
+
+  // Commission earned (all-time vs 30d)
+  const commAll = db.select({
+    total: sql<number>`COALESCE(SUM(${schema.referralEarnings.commissionAmount}), 0)`,
+    count: sql<number>`COUNT(*)`,
+  }).from(schema.referralEarnings)
+    .where(eq(schema.referralEarnings.referrerId, leaderId)).get();
+
+  const comm30d = db.select({
+    total: sql<number>`COALESCE(SUM(${schema.referralEarnings.commissionAmount}), 0)`,
+    count: sql<number>`COUNT(*)`,
+  }).from(schema.referralEarnings)
+    .where(and(
+      eq(schema.referralEarnings.referrerId, leaderId),
+      sql`${schema.referralEarnings.createdAt} >= ${thirtyDaysAgo}`,
+    )).get();
+
+  // Top earning follower (all-time)
+  const topFollowerRow = db.select({
+    followerId: schema.referralEarnings.referredId,
+    earned: sql<number>`COALESCE(SUM(${schema.referralEarnings.commissionAmount}), 0)`,
+  }).from(schema.referralEarnings)
+    .where(eq(schema.referralEarnings.referrerId, leaderId))
+    .groupBy(schema.referralEarnings.referredId)
+    .orderBy(desc(sql`COALESCE(SUM(${schema.referralEarnings.commissionAmount}), 0)`))
+    .limit(1).get();
+
+  const growthTip = followers.length === 0
+    ? "No followers yet. Share your leader stats link to attract copy traders."
+    : followers.length < 5
+    ? `You have ${followers.length} follower(s). Top leaders on the platform have 10+ followers. Focus on consistent win rate.`
+    : `Strong following! ${followers.length} followers with $${round2(totalAllocated)} allocated. 20% commission on all profitable copy trades.`;
+
+  return c.json({
+    leader_id: leaderId,
+    followers: followers.map(f => ({
+      follower_id: f.followerId,
+      allocation_usdc: round2(f.allocationUsdc),
+      max_position_size: f.maxPositionSize,
+      stop_loss_pct: f.stopLossPct,
+      following_since: f.since,
+    })),
+    summary: {
+      active_followers: followers.length,
+      total_allocated_usdc: round2(totalAllocated),
+      open_copy_positions: openCopyCount,
+    },
+    commissions: {
+      earned_30d: round2(comm30d?.total ?? 0),
+      trades_30d: comm30d?.count ?? 0,
+      earned_all_time: round2(commAll?.total ?? 0),
+      trades_all_time: commAll?.count ?? 0,
+      rate_pct: 20,
+      top_follower: topFollowerRow
+        ? { follower_id: topFollowerRow.followerId, earned_from: round2(topFollowerRow.earned) }
+        : null,
+    },
+    growth_tip: growthTip,
+    public_stats_url: `/v1/copy/leader/${leaderId}/stats`,
   });
 });
 
