@@ -531,4 +531,71 @@ app.get("/portfolio", async (c) => {
   });
 });
 
+// GET /pnl-history — daily cumulative PnL chart data
+app.get("/pnl-history", (c) => {
+  const agentId = c.get("agentId") as string;
+  const days = Math.min(parseInt(c.req.query("days") ?? "30") || 30, 365);
+
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+
+  const trades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    createdAt: schema.trades.createdAt,
+    coin: schema.trades.coin,
+    side: schema.trades.side,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, agentId),
+      sql`${schema.trades.createdAt} >= ${since}`,
+    ))
+    .orderBy(schema.trades.createdAt)
+    .all();
+
+  // Aggregate by day (UTC)
+  const dayMap = new Map<string, { date: string; pnl: number; fees: number; trades: number }>();
+
+  for (const trade of trades) {
+    const date = new Date(trade.createdAt * 1000).toISOString().slice(0, 10); // YYYY-MM-DD
+    const existing = dayMap.get(date) ?? { date, pnl: 0, fees: 0, trades: 0 };
+    existing.pnl += trade.realizedPnl;
+    existing.fees += trade.fee;
+    existing.trades += 1;
+    dayMap.set(date, existing);
+  }
+
+  // Sort by date and compute cumulative PnL
+  const dailyData = Array.from(dayMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+  let cumulative = 0;
+  const chart = dailyData.map(d => {
+    cumulative += d.pnl;
+    return {
+      date: d.date,
+      daily_pnl: round2(d.pnl),
+      daily_fees: round2(d.fees),
+      trades: d.trades,
+      cumulative_pnl: round2(cumulative),
+    };
+  });
+
+  const totalPnl = round2(trades.reduce((sum, t) => sum + t.realizedPnl, 0));
+  const totalFees = round2(trades.reduce((sum, t) => sum + t.fee, 0));
+  const wins = trades.filter(t => t.realizedPnl > 0).length;
+
+  return c.json({
+    period_days: days,
+    summary: {
+      total_pnl: totalPnl,
+      total_fees: totalFees,
+      net_pnl: round2(totalPnl - totalFees),
+      total_trades: trades.length,
+      win_rate_pct: trades.length > 0 ? round2((wins / trades.length) * 100) : null,
+      best_day: chart.length > 0 ? chart.reduce((best, d) => d.daily_pnl > best.daily_pnl ? d : best, chart[0]) : null,
+      worst_day: chart.length > 0 ? chart.reduce((worst, d) => d.daily_pnl < worst.daily_pnl ? d : worst, chart[0]) : null,
+    },
+    chart,
+    note: `Daily realized PnL from closed trades in last ${days} days`,
+  });
+});
+
 export default app;
