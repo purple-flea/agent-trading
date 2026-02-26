@@ -227,6 +227,43 @@ v1.get("/docs", (c) => c.json({
 
 app.route("/v1", v1);
 
+// ─── Changelog ───
+app.get("/changelog", (c) => c.json({
+  service: "agent-trading",
+  changelog: [
+    {
+      version: "3.2.0",
+      date: "2026-02-26",
+      changes: [
+        "Added GET /v1/trade/portfolio: full portfolio snapshot with unrealized PnL, exposure by direction, utilization %",
+        "Added GET /openapi.json with full OpenAPI 3.0 spec (16+ paths)",
+        "Added global error handler and 404 handler",
+        "Fixed leverage validation: must be >= 1",
+      ],
+    },
+    {
+      version: "3.1.0",
+      date: "2026-02-25",
+      changes: [
+        "Added market signals (GET /v1/signals): AI-generated trade signals with confidence scores",
+        "Added copy trading (GET /v1/copy/leaders, POST /v1/copy/follow/:agentId)",
+        "Added 3-level referral commission chain",
+        "Sliding window rate limiting",
+      ],
+    },
+    {
+      version: "3.0.0",
+      date: "2026-02-22",
+      changes: [
+        "Launched perpetuals trading via Hyperliquid (275+ markets)",
+        "Real order execution: market, limit, take-profit, stop-loss",
+        "Position management: reduce, close, list open positions",
+        "Trade history and realized PnL tracking",
+      ],
+    },
+  ],
+}));
+
 // ─── OpenAPI spec ───
 app.get("/openapi.json", (c) => c.json({
   openapi: "3.0.0",
