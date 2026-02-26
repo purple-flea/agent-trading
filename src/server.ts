@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { runMigrations, db } from "./db/index.js";
-import { agents } from "./db/schema.js";
+import { agents, positions } from "./db/schema.js";
 import { sql } from "drizzle-orm";
 import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
@@ -155,6 +155,18 @@ v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
 v1.route("/referral", referralRoutes);
 v1.route("/copy", copyRoutes);
+
+// ─── Public stats (no auth) ───
+v1.get("/public-stats", (c) => {
+  const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
+  const positionResult = db.select({ count: sql<number>`count(*)` }).from(positions).get();
+  return c.json({
+    service: "agent-trading",
+    registered_agents: agentResult?.count ?? 0,
+    total_positions: positionResult?.count ?? 0,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
