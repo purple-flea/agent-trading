@@ -403,4 +403,79 @@ app.get("/history", (c) => {
   return c.json({ trades, count: trades.length });
 });
 
+// GET /portfolio — portfolio summary with total exposure, PnL, and risk analysis
+app.get("/portfolio", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+
+  // Get open positions from DB
+  const openPositions = db.select().from(schema.positions)
+    .where(and(eq(schema.positions.agentId, agentId), eq(schema.positions.status, "open")))
+    .all();
+
+  // Enrich with current prices
+  const enriched = await Promise.all(openPositions.map(async (p) => {
+    const currentPrice = await getPrice(p.coin).catch(() => null);
+    let unrealizedPnl = 0;
+    let pnlPct = 0;
+    if (currentPrice) {
+      const pnlRaw = (currentPrice - p.entryPrice) / p.entryPrice;
+      unrealizedPnl = p.side === "long"
+        ? round2(p.sizeUsd * pnlRaw)
+        : round2(p.sizeUsd * (-pnlRaw));
+      pnlPct = round2(pnlRaw * 100 * (p.side === "long" ? 1 : -1));
+    }
+    return {
+      id: p.id,
+      coin: p.coin,
+      ticker: p.coin.replace("xyz:", ""),
+      side: p.side,
+      size_usd: p.sizeUsd,
+      leverage: p.leverage,
+      entry_price: p.entryPrice,
+      current_price: currentPrice,
+      unrealized_pnl: unrealizedPnl,
+      pnl_pct: pnlPct,
+      notional: currentPrice ? round2(Math.abs(p.sizeUsd / p.entryPrice * (currentPrice))) : null,
+    };
+  }));
+
+  const totalExposure = enriched.reduce((sum, p) => sum + p.size_usd, 0);
+  const totalUnrealizedPnl = enriched.reduce((sum, p) => sum + p.unrealized_pnl, 0);
+  const longExposure = enriched.filter(p => p.side === "long").reduce((sum, p) => sum + p.size_usd, 0);
+  const shortExposure = enriched.filter(p => p.side === "short").reduce((sum, p) => sum + p.size_usd, 0);
+  const netExposure = longExposure - shortExposure;
+
+  // Closed trade summary from DB
+  const closedStats = db.select({
+    count: sql<number>`count(*)`,
+    totalPnl: sql<number>`COALESCE(SUM(realized_pnl), 0)`,
+    wins: sql<number>`SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)`,
+  }).from(schema.trades).where(eq(schema.trades.agentId, agentId)).get();
+
+  const winRate = closedStats && closedStats.count > 0
+    ? round2((closedStats.wins / closedStats.count) * 100)
+    : null;
+
+  return c.json({
+    summary: {
+      open_positions: enriched.length,
+      total_exposure_usd: round2(totalExposure),
+      long_exposure_usd: round2(longExposure),
+      short_exposure_usd: round2(shortExposure),
+      net_exposure_usd: round2(netExposure),
+      net_direction: netExposure > 0 ? "net_long" : netExposure < 0 ? "net_short" : "neutral",
+      unrealized_pnl: round2(totalUnrealizedPnl),
+      max_position_usd: agent.maxPositionUsd,
+      utilization_pct: agent.maxPositionUsd > 0 ? round2(totalExposure / agent.maxPositionUsd * 100) : 0,
+    },
+    lifetime: {
+      total_trades: closedStats?.count ?? 0,
+      realized_pnl: round2(closedStats?.totalPnl ?? 0),
+      win_rate_pct: winRate,
+    },
+    positions: enriched,
+  });
+});
+
 export default app;
