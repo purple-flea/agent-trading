@@ -126,15 +126,23 @@ app.post("/open", async (c) => {
       lastActive: Math.floor(Date.now() / 1000),
     }).where(eq(schema.agents.id, agentId)).run();
 
-    // Referral commission (20% of our fee markup)
+    // Referral commission (20% of our fee markup, 3-level chain)
     if (agent.referredBy && fees.ourFee > 0) {
-      const commission = round2(fees.ourFee * 0.20);
-      if (commission >= 0.01) {
-        db.insert(schema.referralEarnings).values({
-          id: `ref_${randomUUID()}`,
-          referrerId: agent.referredBy, referredId: agentId,
-          feeAmount: fees.ourFee, commissionAmount: commission, orderId,
-        }).run();
+      const levelMultipliers = [1.0, 0.5, 0.25];
+      let currentReferredId = agentId;
+      let currentReferrerId: string | null = agent.referredBy;
+      for (let level = 0; level < 3 && currentReferrerId; level++) {
+        const commission = round2(fees.ourFee * 0.20 * levelMultipliers[level]);
+        if (commission >= 0.01) {
+          db.insert(schema.referralEarnings).values({
+            id: `ref_${randomUUID()}`,
+            referrerId: currentReferrerId, referredId: currentReferredId,
+            feeAmount: fees.ourFee, commissionAmount: commission, orderId,
+          }).run();
+        }
+        const nextRef = db.select().from(schema.agents).where(eq(schema.agents.id, currentReferrerId)).get();
+        currentReferredId = currentReferrerId;
+        currentReferrerId = nextRef?.referredBy ?? null;
       }
     }
 
@@ -238,15 +246,23 @@ app.post("/close", async (c) => {
       lastActive: Math.floor(Date.now() / 1000),
     }).where(eq(schema.agents.id, agentId)).run();
 
-    // Referral commission on close (20% of our fee markup)
+    // Referral commission on close (20% of our fee markup, 3-level chain)
     if (agent.referredBy && fees.ourFee > 0) {
-      const commission = round2(fees.ourFee * 0.20);
-      if (commission >= 0.01) {
-        db.insert(schema.referralEarnings).values({
-          id: `ref_${randomUUID()}`,
-          referrerId: agent.referredBy, referredId: agentId,
-          feeAmount: fees.ourFee, commissionAmount: commission, orderId,
-        }).run();
+      const levelMultipliers = [1.0, 0.5, 0.25];
+      let currentReferredId = agentId;
+      let currentReferrerId: string | null = agent.referredBy;
+      for (let level = 0; level < 3 && currentReferrerId; level++) {
+        const commission = round2(fees.ourFee * 0.20 * levelMultipliers[level]);
+        if (commission >= 0.01) {
+          db.insert(schema.referralEarnings).values({
+            id: `ref_${randomUUID()}`,
+            referrerId: currentReferrerId, referredId: currentReferredId,
+            feeAmount: fees.ourFee, commissionAmount: commission, orderId,
+          }).run();
+        }
+        const nextRef = db.select().from(schema.agents).where(eq(schema.agents.id, currentReferrerId)).get();
+        currentReferredId = currentReferrerId;
+        currentReferrerId = nextRef?.referredBy ?? null;
       }
     }
 
