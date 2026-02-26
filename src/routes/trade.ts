@@ -598,4 +598,128 @@ app.get("/pnl-history", (c) => {
   });
 });
 
+// GET /size-calculator — position sizing and risk management calculator (no external calls)
+app.get("/size-calculator", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  // Query params
+  const accountSize = parseFloat(c.req.query("account_size") || "0");
+  const riskPct = parseFloat(c.req.query("risk_pct") || "1"); // % of account to risk
+  const leverage = parseInt(c.req.query("leverage") || "5");
+  const entryPrice = parseFloat(c.req.query("entry_price") || "0");
+  const stopLossPct = parseFloat(c.req.query("stop_loss_pct") || "2"); // % from entry to stop
+
+  if (!accountSize || !entryPrice) {
+    return c.json({
+      error: "missing_params",
+      message: "Provide ?account_size=1000&entry_price=67000",
+      optional: "risk_pct (default 1%), leverage (default 5), stop_loss_pct (default 2%)",
+      example: "/v1/trade/size-calculator?account_size=1000&entry_price=67000&risk_pct=1&leverage=5&stop_loss_pct=2",
+    }, 400);
+  }
+
+  if (riskPct > 100 || riskPct <= 0) {
+    return c.json({ error: "invalid_risk_pct", message: "risk_pct must be between 0.1 and 100" }, 400);
+  }
+  if (leverage < 1 || leverage > 100) {
+    return c.json({ error: "invalid_leverage", message: "leverage must be between 1 and 100" }, 400);
+  }
+
+  // Risk amount in USD
+  const riskAmountUsd = accountSize * (riskPct / 100);
+
+  // Stop loss distance
+  const stopLossDistancePct = stopLossPct / 100;
+  const stopLossDistanceUsd = entryPrice * stopLossDistancePct;
+
+  // Position size based on risk: risk / stop_distance_per_unit
+  // For leveraged trade: position size = risk_amount / (stop_loss_pct / leverage)
+  // Actually: contracts = riskAmount / stopLossDistanceUsd (for 1 unit of asset)
+  // position_size_usd = contracts * entry_price / leverage ... simplified:
+  // position_size_usd = risk_amount / (stop_loss_pct) * leverage
+  const positionSizeUsd = (riskAmountUsd / stopLossDistancePct) * (1 / leverage) * leverage;
+  // Simplified: positionSizeUsd = riskAmountUsd / stopLossDistancePct
+
+  // Wait, correct formula: position_size = risk / stop_loss_per_unit
+  // stop_loss_per_unit = entryPrice * stopLossDistancePct
+  // In leveraged trading: position_size_usd = risk_amount_usd / stopLossDistancePct (leverage neutral for risk calc)
+  const correctPositionSize = riskAmountUsd / stopLossDistancePct;
+
+  // Margin required (position / leverage)
+  const marginRequired = correctPositionSize / leverage;
+
+  // Max position (limited by margin available)
+  const maxPositionByMargin = accountSize * leverage;
+
+  // Kelly fraction (simplified): f = (win_rate * avg_win/avg_loss - (1-win_rate)) / (avg_win/avg_loss)
+  // Use historical win rate if available
+  const tradeStats = db.select({
+    wins: sql<number>`SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)`,
+    losses: sql<number>`SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END)`,
+    avgWin: sql<number>`AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE NULL END)`,
+    avgLoss: sql<number>`AVG(CASE WHEN realized_pnl < 0 THEN realized_pnl ELSE NULL END)`,
+  }).from(schema.trades).where(eq(schema.trades.agentId, agentId)).get();
+
+  let kellyFraction: number | null = null;
+  let kellyPositionSize: number | null = null;
+
+  if (tradeStats && (tradeStats.wins + tradeStats.losses) >= 10) {
+    const total = tradeStats.wins + tradeStats.losses;
+    const winRate = tradeStats.wins / total;
+    const avgWin = tradeStats.avgWin ?? 0;
+    const avgLoss = Math.abs(tradeStats.avgLoss ?? 1);
+    const winLossRatio = avgWin / avgLoss;
+    kellyFraction = (winRate * winLossRatio - (1 - winRate)) / winLossRatio;
+    kellyFraction = Math.max(0, Math.min(kellyFraction, 0.25)); // cap at 25% for safety
+    kellyPositionSize = round2(accountSize * kellyFraction);
+  }
+
+  // Risk-to-reward suggestions
+  const stopLossPrice = entryPrice * (1 - stopLossDistancePct); // assumes long
+  const tp_1r = round2(entryPrice * (1 + stopLossDistancePct));     // 1:1 R/R
+  const tp_2r = round2(entryPrice * (1 + stopLossDistancePct * 2)); // 2:1 R/R
+  const tp_3r = round2(entryPrice * (1 + stopLossDistancePct * 3)); // 3:1 R/R
+
+  const finalPosition = Math.min(round2(correctPositionSize), maxPositionByMargin);
+  const cappedByAccount = correctPositionSize > maxPositionByMargin;
+
+  return c.json({
+    inputs: {
+      account_size_usd: accountSize,
+      risk_pct: riskPct,
+      risk_amount_usd: round2(riskAmountUsd),
+      leverage,
+      entry_price: entryPrice,
+      stop_loss_pct: stopLossPct,
+    },
+    recommended: {
+      position_size_usd: finalPosition,
+      margin_required_usd: round2(finalPosition / leverage),
+      account_utilization_pct: round2((finalPosition / leverage / accountSize) * 100),
+      note: cappedByAccount ? "Position capped by account size × leverage" : "Position sized by risk tolerance",
+    },
+    kelly: kellyPositionSize !== null ? {
+      kelly_fraction_pct: round2((kellyFraction ?? 0) * 100),
+      kelly_position_size_usd: kellyPositionSize,
+      based_on_trades: (tradeStats?.wins ?? 0) + (tradeStats?.losses ?? 0),
+      note: "Kelly Criterion based on your actual trade history",
+    } : {
+      note: "Need at least 10 closed trades for Kelly Criterion calculation",
+    },
+    risk_reward: {
+      stop_loss_price: round2(stopLossPrice),
+      tp_1_to_1: tp_1r,
+      tp_2_to_1: tp_2r,
+      tp_3_to_1: tp_3r,
+      note: "Take-profit levels for long positions. Invert for shorts.",
+    },
+    rules_of_thumb: [
+      `Never risk more than 2% of account on a single trade (you risk ${riskPct}%)`,
+      `With ${leverage}x leverage, a ${round2(100 / leverage)}% adverse move = 100% margin loss`,
+      "Use stop-losses on every trade. Margin calls are painful.",
+      "Scale into positions — don't put full size on first entry",
+    ],
+  });
+});
+
 export default app;
