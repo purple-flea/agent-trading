@@ -53,10 +53,11 @@ app.post("/register", async (c) => {
     finalAddress = hlWalletAddress.toLowerCase();
     encryptedKey = encryptKey(hlSigningKey);
   } else if (hlSigningKey && !hlWalletAddress) {
-    // Signing key without address is not useful — derive address from key
+    // Signing key without address — derive address from key, use CBC (no env var required)
     const wallet = new Wallet(hlSigningKey);
     finalAddress = wallet.address.toLowerCase();
-    encryptedKey = encryptKey(hlSigningKey);
+    encryptedKey = encryptKeyCbc(hlSigningKey);
+    isGenerated = true; // CBC was used; trade.ts checks generatedWallet to pick decryptor
   } else {
     // No wallet provided — generate a fresh EVM wallet for the agent
     const wallet = Wallet.createRandom();

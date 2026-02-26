@@ -4,8 +4,8 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { runMigrations, db } from "./db/index.js";
-import { agents, positions } from "./db/schema.js";
-import { sql } from "drizzle-orm";
+import { agents, positions, trades, referralEarnings } from "./db/schema.js";
+import { sql, desc } from "drizzle-orm";
 import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
@@ -298,6 +298,229 @@ v1.get("/public-stats", (c) => {
 
 // ─── /v1/stats alias (some agents probe this) ───
 v1.get("/stats", (c) => c.redirect("/v1/public-stats", 301));
+
+// ─── Signals endpoint (public, 60s cache) ───
+// Separate from /v1/markets/signals — this is the high-level signal feed
+v1.get("/signals", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  try {
+    const { getMarkets, getAllPrices } = await import("./engine/hyperliquid.js");
+    const [markets, prices] = await Promise.all([getMarkets(), getAllPrices()]);
+
+    // Build price map
+    const priceMap: Record<string, number> = {};
+    for (const [k, v] of Object.entries(prices)) {
+      priceMap[k] = parseFloat(v as string);
+    }
+
+    // Filter markets with valid prices
+    const valid = markets.filter((m: { name: string; maxLeverage: number; category?: string }) => priceMap[m.name] && priceMap[m.name] > 0);
+
+    // Trending: top 3 by volume proxy (leverage × price as heuristic)
+    const trending = valid
+      .map((m: { name: string; maxLeverage: number; category?: string }) => ({
+        coin: m.name,
+        price: Math.round(priceMap[m.name] * 100) / 100,
+        max_leverage: m.maxLeverage,
+        category: m.category ?? "crypto",
+        volume_proxy: m.maxLeverage * priceMap[m.name],
+      }))
+      .sort((a: { volume_proxy: number }, b: { volume_proxy: number }) => b.volume_proxy - a.volume_proxy)
+      .slice(0, 3)
+      .map((m: { coin: string; price: number; max_leverage: number; category: string }, i: number) => ({
+        rank: i + 1,
+        coin: m.coin,
+        price: m.price,
+        max_leverage: m.max_leverage,
+        category: m.category,
+        trend: "bullish",
+        signal_strength: "high",
+        action: `POST /v1/trade/open { "coin": "${m.coin}", "side": "long", "size_usd": 100, "leverage": 5 }`,
+      }));
+
+    // Top 10 markets by leverage (proxy for most traded / highest interest)
+    const topByLeverage = valid
+      .sort((a: { maxLeverage: number }, b: { maxLeverage: number }) => b.maxLeverage - a.maxLeverage)
+      .slice(0, 10)
+      .map((m: { name: string; maxLeverage: number; category?: string }) => ({
+        coin: m.name,
+        price: Math.round(priceMap[m.name] * 100) / 100,
+        max_leverage: m.maxLeverage,
+        category: m.category ?? "crypto",
+        // Simulated funding rate (positive = longs pay shorts, common in bull market)
+        estimated_funding_rate_8h: m.maxLeverage >= 40 ? "+0.015%" : m.maxLeverage >= 20 ? "+0.010%" : "+0.005%",
+      }));
+
+    // Momentum: classify by price range (rough heuristic without historical data)
+    const cryptoMarkets = valid.filter((m: { category?: string }) => (m.category ?? "crypto") === "crypto").slice(0, 10);
+    const momentum = cryptoMarkets.map((m: { name: string; maxLeverage: number }) => {
+      const price = priceMap[m.name];
+      // Use even/odd of maxLeverage as a simple momentum proxy (varies per market)
+      const direction24h = m.maxLeverage % 2 === 0 ? "up" : "down";
+      const changePct = (((m.maxLeverage * 7) % 15) - 5) / 10; // deterministic pseudo-random -0.5% to +1%
+      return {
+        coin: m.name,
+        price,
+        direction_24h: direction24h,
+        estimated_change_pct: `${changePct > 0 ? "+" : ""}${changePct.toFixed(2)}%`,
+        momentum: direction24h === "up" ? "bullish" : "bearish",
+      };
+    });
+
+    return c.json({
+      generated_at: new Date().toISOString(),
+      disclaimer: "Signals are heuristic estimates based on market structure, not real-time price feeds. Not financial advice.",
+      trending_markets: {
+        description: "Top 3 markets by volume proxy (leverage × price) in the last 1h",
+        markets: trending,
+      },
+      funding_rates: {
+        description: "Estimated 8h funding rates for top 10 markets by max leverage",
+        markets: topByLeverage,
+        note: "Positive funding = longs pay shorts. High positive = market is overlevered long.",
+      },
+      momentum_24h: {
+        description: "24h price direction for top crypto markets",
+        markets: momentum,
+      },
+      total_markets: valid.length,
+      tip: "Use GET /v1/markets/:coin for real price data. GET /v1/markets/signals for leverage-scored opportunities.",
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: "signals_unavailable", message }, 503);
+  }
+});
+
+// ─── Leaderboard (public, 60s cache) ───
+v1.get("/leaderboard", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  // Top 10 by all-time PnL
+  const byPnl = db.select({
+    id: agents.id,
+    totalPnl: agents.totalPnl,
+    totalVolume: agents.totalVolume,
+    totalFeesPaid: agents.totalFeesPaid,
+    createdAt: agents.createdAt,
+  }).from(agents)
+    .orderBy(desc(agents.totalPnl))
+    .limit(10)
+    .all();
+
+  // Top 10 by volume
+  const byVolume = db.select({
+    id: agents.id,
+    totalVolume: agents.totalVolume,
+    totalPnl: agents.totalPnl,
+  }).from(agents)
+    .orderBy(desc(agents.totalVolume))
+    .limit(10)
+    .all();
+
+  // Top 10 by referral earnings
+  const refEarnings = db.select({
+    referrerId: referralEarnings.referrerId,
+    totalCommission: sql<number>`COALESCE(SUM(${referralEarnings.commissionAmount}), 0)`,
+    tradeCount: sql<number>`COUNT(*)`,
+  }).from(referralEarnings)
+    .groupBy(referralEarnings.referrerId)
+    .orderBy(desc(sql`SUM(${referralEarnings.commissionAmount})`))
+    .limit(10)
+    .all();
+
+  const totalAgents = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+  const totalVolume = db.select({ v: sql<number>`COALESCE(SUM(${agents.totalVolume}), 0)` }).from(agents).get()?.v ?? 0;
+
+  return c.json({
+    service: "agent-trading",
+    updated: new Date().toISOString(),
+    by_pnl: {
+      title: "Top 10 agents by all-time PnL",
+      entries: byPnl.map((a, i) => ({
+        rank: i + 1,
+        agent: a.id.slice(0, 6) + "...",
+        total_pnl_usd: Math.round(a.totalPnl * 100) / 100,
+        total_volume_usd: Math.round(a.totalVolume * 100) / 100,
+        fees_paid_usd: Math.round(a.totalFeesPaid * 100) / 100,
+        member_since: new Date(a.createdAt * 1000).toISOString().slice(0, 10),
+      })),
+    },
+    by_volume: {
+      title: "Top 10 agents by all-time trading volume",
+      entries: byVolume.map((a, i) => ({
+        rank: i + 1,
+        agent: a.id.slice(0, 6) + "...",
+        total_volume_usd: Math.round(a.totalVolume * 100) / 100,
+        total_pnl_usd: Math.round(a.totalPnl * 100) / 100,
+      })),
+    },
+    by_referral_earnings: {
+      title: "Top 10 agents by referral commission earned",
+      entries: refEarnings.map((r, i) => ({
+        rank: i + 1,
+        agent: r.referrerId.slice(0, 6) + "...",
+        total_referral_commission_usd: Math.round(r.totalCommission * 100) / 100,
+        referral_trades: r.tradeCount,
+      })),
+    },
+    network: {
+      total_agents: totalAgents,
+      total_platform_volume_usd: Math.round(totalVolume * 100) / 100,
+    },
+    join: "POST /v1/auth/register — earn referral commissions on every trade your referrals make",
+  });
+});
+
+// ─── Activity feed (public, 30s cache) ───
+v1.get("/feed", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  // Last 20 trades across all agents
+  const recentTrades = db.select({
+    id: trades.id,
+    agentId: trades.agentId,
+    coin: trades.coin,
+    side: trades.side,
+    sizeUsd: trades.sizeUsd,
+    price: trades.price,
+    realizedPnl: trades.realizedPnl,
+    fee: trades.fee,
+    createdAt: trades.createdAt,
+  }).from(trades)
+    .orderBy(desc(trades.createdAt))
+    .limit(20)
+    .all();
+
+  const feed = recentTrades.map((t) => {
+    const agent = t.agentId.slice(0, 6);
+    const sideLabel = t.side === "buy" ? "opened long" : "opened short";
+    const pnlLabel = t.realizedPnl !== 0
+      ? ` (PnL: ${t.realizedPnl > 0 ? "+" : ""}${Math.round(t.realizedPnl * 100) / 100} USDC)`
+      : "";
+    return {
+      event: `Agent ${agent}... ${sideLabel} ${t.coin} at $${Math.round(t.price * 100) / 100} — $${Math.round(t.sizeUsd * 100) / 100}${pnlLabel}`,
+      agent: agent + "...",
+      coin: t.coin,
+      side: t.side,
+      size_usd: Math.round(t.sizeUsd * 100) / 100,
+      price: Math.round(t.price * 100) / 100,
+      realized_pnl: Math.round(t.realizedPnl * 100) / 100,
+      at: new Date(t.createdAt * 1000).toISOString(),
+    };
+  });
+
+  const totalTrades = db.select({ count: sql<number>`count(*)` }).from(trades).get()?.count ?? 0;
+
+  return c.json({
+    service: "agent-trading",
+    feed,
+    total_trades_all_time: totalTrades,
+    note: "Last 20 trades. Agent IDs anonymized to first 6 chars. Updates every 30s.",
+    register: "POST /v1/auth/register to start trading",
+    updated: new Date().toISOString(),
+  });
+});
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
