@@ -248,6 +248,81 @@ app.get("/summary", async (c) => {
   }
 });
 
+// GET /markets/sentiment — Fear & Greed index + top movers (no auth)
+// NOTE: must be before /:coin wildcard
+app.get("/sentiment", async (c) => {
+  c.header("Cache-Control", "public, max-age=300"); // 5min cache
+
+  const [fngResult, pricesResult] = await Promise.allSettled([
+    // Fear & Greed Index from alternative.me
+    fetch("https://api.alternative.me/fng/?limit=3", {
+      signal: AbortSignal.timeout(5000),
+      headers: { "Accept": "application/json" },
+    }).then(r => r.json() as Promise<any>),
+    // Current prices for top movers calculation
+    getAllPrices(),
+  ]);
+
+  // Parse Fear & Greed
+  let fearGreed: { value: number; classification: string; timestamp: string } | null = null;
+  let fearGreedHistory: Array<{ value: number; classification: string; date: string }> = [];
+  if (fngResult.status === "fulfilled") {
+    const data = fngResult.value;
+    if (Array.isArray(data?.data)) {
+      const [current, ...prev] = data.data;
+      fearGreed = {
+        value: parseInt(current.value),
+        classification: current.value_classification,
+        timestamp: new Date(parseInt(current.timestamp) * 1000).toISOString(),
+      };
+      fearGreedHistory = prev.map((d: any) => ({
+        value: parseInt(d.value),
+        classification: d.value_classification,
+        date: new Date(parseInt(d.timestamp) * 1000).toISOString().slice(0, 10),
+      }));
+    }
+  }
+
+  // Market interpretation
+  const fngValue = fearGreed?.value ?? 50;
+  const marketMood = fngValue >= 80 ? "extreme_greed"
+    : fngValue >= 60 ? "greed"
+    : fngValue >= 45 ? "neutral"
+    : fngValue >= 25 ? "fear"
+    : "extreme_fear";
+
+  const tradingImplication = fngValue >= 75
+    ? "Strong greed — consider risk-off positioning or profit-taking on long positions"
+    : fngValue >= 55
+    ? "Mild greed — momentum favors longs but watch for pullbacks"
+    : fngValue >= 45
+    ? "Neutral — wait for clearer directional signal"
+    : fngValue >= 25
+    ? "Fear — potential buying opportunity for long-term positions"
+    : "Extreme fear — historically a buy signal, but high volatility risk";
+
+  // Interesting key prices
+  const prices = pricesResult.status === "fulfilled" ? pricesResult.value : {};
+  const keyCoins = ["BTC", "ETH", "SOL", "BNB", "DOGE", "xyz:GOLD", "xyz:TSLA", "xyz:NVDA"];
+  const keyPrices = keyCoins.map(c => ({
+    coin: c.replace("xyz:", ""),
+    price_usd: prices[c] ? parseFloat(prices[c]) : null,
+  })).filter(m => m.price_usd !== null);
+
+  return c.json({
+    sentiment: {
+      fear_and_greed: fearGreed,
+      market_mood: marketMood,
+      trading_implication: tradingImplication,
+      history_3d: fearGreedHistory,
+    },
+    key_prices: keyPrices,
+    generated_at: new Date().toISOString(),
+    source: "Fear & Greed: alternative.me | Prices: Hyperliquid",
+    disclaimer: "Sentiment indicators are informational only, not financial advice.",
+  });
+});
+
 // GET /markets/:coin — single market
 app.get("/:coin", async (c) => {
   const coin = c.req.param("coin").toUpperCase();
