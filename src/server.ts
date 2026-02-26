@@ -215,6 +215,12 @@ const PURPLEFLEA_NETWORK = {
 app.get("/.well-known/purpleflea.json", (c) => c.json(PURPLEFLEA_NETWORK));
 app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
 
+// ─── Ping (ultra-lightweight uptime check) ───
+app.get("/ping", (c) => {
+  c.header("Cache-Control", "no-cache");
+  return c.text("pong");
+});
+
 const startTime = Date.now();
 app.get("/health", (c) => {
   let dbStatus = "ok";
@@ -273,6 +279,7 @@ v1.route("/copy", copyRoutes);
 
 // ─── Public stats (no auth) ───
 v1.get("/public-stats", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
   const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
   const positionResult = db.select({ count: sql<number>`count(*)` }).from(positions).get();
   return c.json({
@@ -288,6 +295,7 @@ v1.get("/stats", (c) => c.redirect("/v1/public-stats", 301));
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
   const result = db.select({ count: sql<number>`count(*)` }).from(agents).get();
   const agentCount = result?.count ?? 0;
   return c.json({
