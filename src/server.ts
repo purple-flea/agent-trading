@@ -324,8 +324,9 @@ v1.get("/gossip", (c) => {
 v1.get("/docs", (c) => c.json({
   version: "3.0.0 — Real Hyperliquid Execution",
   auth: {
-    "POST /v1/auth/register": "Create account { hl_wallet_address, hl_signing_key, referral_code? }",
+    "POST /v1/auth/register": "Create account — hl_wallet_address + hl_signing_key optional; wallet auto-generated if omitted",
     "GET /v1/auth/account": "Account info, tier, wallet status",
+    "GET /v1/auth/deposit-address": "Retrieve your Hyperliquid deposit address",
   },
   markets: {
     "GET /v1/markets": "All 275+ markets with live prices (crypto + stocks + commodities + forex)",
@@ -443,11 +444,12 @@ app.get("/openapi.json", (c) => c.json({
       post: {
         summary: "Register agent account",
         security: [],
-        requestBody: { content: { "application/json": { schema: { type: "object", required: ["hl_wallet_address", "hl_signing_key"], properties: { hl_wallet_address: { type: "string" }, hl_signing_key: { type: "string" }, referral_code: { type: "string" } } } } } },
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: { hl_wallet_address: { type: "string", description: "Optional — wallet auto-generated if omitted" }, hl_signing_key: { type: "string", description: "Optional — service generates key if omitted" }, referral_code: { type: "string" } } } } } },
         responses: { "201": { description: "API key + account info" } },
       },
     },
     "/v1/auth/account": { get: { summary: "Account info, tier, wallet status", responses: { "200": { description: "Account details" } } } },
+    "/v1/auth/deposit-address": { get: { summary: "Retrieve your Hyperliquid deposit address", responses: { "200": { description: "Deposit address" } } } },
     "/v1/markets": { get: { summary: "All 275+ markets with live prices", security: [], responses: { "200": { description: "Market list" } } } },
     "/v1/markets/stocks": { get: { summary: "Equity perpetuals", security: [], responses: { "200": { description: "Stock perps" } } } },
     "/v1/markets/commodities": { get: { summary: "Commodity perpetuals", security: [], responses: { "200": { description: "Commodity perps" } } } },

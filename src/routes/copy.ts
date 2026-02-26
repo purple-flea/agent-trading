@@ -4,7 +4,15 @@ import { db } from "../db/index.js";
 import * as schema from "../db/schema.js";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { agentAuth } from "../middleware/auth.js";
-import { decryptKey } from "../engine/crypto.js";
+import { decryptKey, decryptKeyCbc } from "../engine/crypto.js";
+
+/** Decrypt a signing key using the correct algorithm based on whether wallet was auto-generated */
+function resolveSigningKey(agent: { hlSigningKeyEncrypted: string | null; generatedWallet: number }): string {
+  if (!agent.hlSigningKeyEncrypted) throw new Error("No signing key stored");
+  return agent.generatedWallet === 1
+    ? decryptKeyCbc(agent.hlSigningKeyEncrypted)
+    : decryptKey(agent.hlSigningKeyEncrypted);
+}
 import { submitMarketOrder, submitCloseOrder, calculateFee } from "../engine/hyperliquid.js";
 import type { AppEnv } from "../types.js";
 
@@ -102,7 +110,7 @@ app.delete("/follow/:leader_agent_id", async (c) => {
   if (followerAgent.hlSigningKeyEncrypted && followerAgent.hlWalletAddress && openCopyTrades.length > 0) {
     let signingKey: string;
     try {
-      signingKey = decryptKey(followerAgent.hlSigningKeyEncrypted);
+      signingKey = resolveSigningKey(followerAgent);
     } catch {
       signingKey = "";
     }
@@ -561,7 +569,7 @@ export async function executeCopyOpen(
       }
 
       const lev = Math.min(leverage, followerAgent.maxLeverage);
-      const signingKey = decryptKey(followerAgent.hlSigningKeyEncrypted);
+      const signingKey = resolveSigningKey(followerAgent);
 
       const fill = await submitMarketOrder(
         signingKey,
@@ -657,7 +665,7 @@ export async function executeCopyClose(leaderId: string, originalPositionId: str
         )).get();
       if (!pos) continue;
 
-      const signingKey = decryptKey(followerAgent.hlSigningKeyEncrypted);
+      const signingKey = resolveSigningKey(followerAgent);
       const close = await submitCloseOrder(signingKey, followerAgent.hlWalletAddress, pos.coin, followerAgent.tier);
 
       const currentPrice = close.avgPrice;

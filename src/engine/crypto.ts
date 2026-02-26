@@ -1,8 +1,11 @@
 /**
  * AES-256-GCM encryption for agent signing keys.
  * Keys are encrypted at rest and only decrypted in-memory for order execution.
+ *
+ * Also provides AES-256-CBC encryption for auto-generated wallets using the
+ * built-in service secret (no ENCRYPTION_KEY env var required).
  */
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "crypto";
 
 const ALGO = "aes-256-gcm";
 const IV_LEN = 16;
@@ -60,5 +63,30 @@ export function decryptKey(encryptedHex: string): string {
   const key = deriveKey(salt);
   const decipher = createDecipheriv(ALGO, key, iv);
   decipher.setAuthTag(tag);
+  return decipher.update(ciphertext) + decipher.final("utf8");
+}
+
+// ─── AES-256-CBC for auto-generated wallets ───────────────────────────────────
+// Key derived from a built-in service secret (no env var required).
+// Used when the service generates the EVM wallet on behalf of the agent.
+
+const CBC_ALGO = "aes-256-cbc";
+// Key = sha256("purpleflea_trading_secret_2026") — deterministic 32-byte key
+const CBC_KEY = createHash("sha256").update("purpleflea_trading_secret_2026").digest();
+
+/** Encrypt a private key using AES-256-CBC. Returns hex-encoded (iv + ciphertext). */
+export function encryptKeyCbc(plaintext: string): string {
+  const iv = randomBytes(16);
+  const cipher = createCipheriv(CBC_ALGO, CBC_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return Buffer.concat([iv, encrypted]).toString("hex");
+}
+
+/** Decrypt a hex-encoded AES-256-CBC encrypted key. Returns the original private key string. */
+export function decryptKeyCbc(encryptedHex: string): string {
+  const buf = Buffer.from(encryptedHex, "hex");
+  const iv = buf.subarray(0, 16);
+  const ciphertext = buf.subarray(16);
+  const decipher = createDecipheriv(CBC_ALGO, CBC_KEY, iv);
   return decipher.update(ciphertext) + decipher.final("utf8");
 }
