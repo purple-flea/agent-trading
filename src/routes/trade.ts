@@ -1269,4 +1269,146 @@ app.get("/trading-hours", (c) => {
   });
 });
 
+// GET /correlation — pairwise PnL correlation between traded markets
+
+app.get("/correlation", (c) => {
+  const agentId = c.get("agentId") as string;
+  const days = Math.min(parseInt(c.req.query("days") || "90"), 365);
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+
+  // Get all trades in the window, grouped by day + coin
+  const rawTrades = db.select({
+    coin: schema.trades.coin,
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    createdAt: schema.trades.createdAt,
+  })
+    .from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, agentId),
+      sql`${schema.trades.createdAt} >= ${since}`,
+    ))
+    .all();
+
+  // Get distinct coins with at least 3 trades
+  const coinCount = new Map<string, number>();
+  for (const t of rawTrades) {
+    coinCount.set(t.coin, (coinCount.get(t.coin) ?? 0) + 1);
+  }
+  const coins = Array.from(coinCount.entries())
+    .filter(([_, count]) => count >= 3)
+    .map(([coin]) => coin);
+
+  if (coins.length < 2) {
+    return c.json({
+      message: "Need at least 2 markets with 3+ trades each for correlation analysis",
+      traded_coins: Array.from(coinCount.keys()).map(c => c.replace("xyz:", "")),
+      days_analyzed: days,
+      tip: "Trade more markets to unlock correlation analysis",
+    });
+  }
+
+  // Group daily PnL by coin
+  const dailyPnl = new Map<string, Map<string, number>>();
+  for (const t of rawTrades) {
+    const day = new Date(t.createdAt * 1000).toISOString().slice(0, 10);
+    if (!dailyPnl.has(t.coin)) dailyPnl.set(t.coin, new Map());
+    const coinMap = dailyPnl.get(t.coin)!;
+    coinMap.set(day, (coinMap.get(day) ?? 0) + (t.realizedPnl - t.fee));
+  }
+
+  // Get all days that appear for any coin
+  const allDays = new Set<string>();
+  for (const [, dayMap] of dailyPnl) {
+    for (const day of dayMap.keys()) allDays.add(day);
+  }
+  const sortedDays = Array.from(allDays).sort();
+
+  // Build returns array per coin (0 for days with no trades)
+  const returns: Map<string, number[]> = new Map();
+  for (const coin of coins) {
+    const dayMap = dailyPnl.get(coin) ?? new Map();
+    returns.set(coin, sortedDays.map(d => dayMap.get(d) ?? 0));
+  }
+
+  // Compute Pearson correlation between pairs
+  function pearson(a: number[], b: number[]): number {
+    const n = a.length;
+    if (n < 2) return 0;
+    const meanA = a.reduce((s, x) => s + x, 0) / n;
+    const meanB = b.reduce((s, x) => s + x, 0) / n;
+    const cov = a.reduce((s, x, i) => s + (x - meanA) * (b[i] - meanB), 0);
+    const stdA = Math.sqrt(a.reduce((s, x) => s + (x - meanA) ** 2, 0));
+    const stdB = Math.sqrt(b.reduce((s, x) => s + (x - meanB) ** 2, 0));
+    if (stdA === 0 || stdB === 0) return 0;
+    return cov / (stdA * stdB);
+  }
+
+  const matrix: Array<{
+    coin_a: string;
+    coin_b: string;
+    correlation: number;
+    interpretation: string;
+    risk_flag: boolean;
+  }> = [];
+
+  for (let i = 0; i < coins.length; i++) {
+    for (let j = i + 1; j < coins.length; j++) {
+      const coinA = coins[i];
+      const coinB = coins[j];
+      const a = returns.get(coinA)!;
+      const b = returns.get(coinB)!;
+      const r = parseFloat(pearson(a, b).toFixed(3));
+
+      let interpretation: string;
+      if (r > 0.8) interpretation = "Highly correlated — near-identical PnL pattern";
+      else if (r > 0.5) interpretation = "Moderately correlated — tend to move together";
+      else if (r > 0.2) interpretation = "Weakly correlated — some co-movement";
+      else if (r > -0.2) interpretation = "Uncorrelated — independent PnL drivers";
+      else if (r > -0.5) interpretation = "Mildly inverse — hedge potential";
+      else interpretation = "Strongly inverse — natural hedge";
+
+      matrix.push({
+        coin_a: coinA.replace("xyz:", ""),
+        coin_b: coinB.replace("xyz:", ""),
+        correlation: r,
+        interpretation,
+        risk_flag: r > 0.7, // high positive correlation = concentration risk
+      });
+    }
+  }
+
+  matrix.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
+
+  const highCorrelationPairs = matrix.filter(p => p.risk_flag);
+  const bestHedgePairs = matrix.filter(p => p.correlation < -0.3).sort((a, b) => a.correlation - b.correlation);
+
+  return c.json({
+    days_analyzed: days,
+    coins_analyzed: coins.map(c => c.replace("xyz:", "")),
+    data_points: sortedDays.length,
+    correlation_matrix: matrix,
+    risk_warnings: highCorrelationPairs.length > 0
+      ? highCorrelationPairs.map(p => ({
+          pair: `${p.coin_a}/${p.coin_b}`,
+          correlation: p.correlation,
+          warning: `${p.coin_a} and ${p.coin_b} are highly correlated (r=${p.correlation}). Trading both simultaneously doubles concentration risk.`,
+        }))
+      : null,
+    hedge_opportunities: bestHedgePairs.slice(0, 3).map(p => ({
+      pair: `${p.coin_a}/${p.coin_b}`,
+      correlation: p.correlation,
+      tip: `${p.coin_a} and ${p.coin_b} tend to move inversely — holding both can reduce portfolio volatility.`,
+    })),
+    interpretation_guide: {
+      "1.0 to 0.7": "Highly correlated — avoid holding both simultaneously (doubles risk)",
+      "0.7 to 0.3": "Moderate correlation — some diversification benefit",
+      "0.3 to -0.3": "Low/no correlation — good diversification",
+      "-0.3 to -1.0": "Inverse correlation — natural hedge",
+    },
+    note: "Correlation based on daily realized PnL patterns from your trades. Not the same as price correlation.",
+    tip: "Reduce position size in highly correlated markets to avoid hidden concentration risk.",
+  });
+});
+
 export default app;
