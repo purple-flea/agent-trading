@@ -1138,4 +1138,135 @@ app.get("/drawdown", (c) => {
   });
 });
 
+// GET /trading-hours — analyze best/worst hours and days to trade (pattern analysis)
+
+app.get("/trading-hours", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const trades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    createdAt: schema.trades.createdAt,
+  })
+    .from(schema.trades)
+    .where(eq(schema.trades.agentId, agentId))
+    .all();
+
+  if (trades.length < 5) {
+    return c.json({
+      message: "Need at least 5 trades for pattern analysis",
+      total_trades: trades.length,
+      tip: "Make more trades to unlock trading hour insights",
+    });
+  }
+
+  // Bucket by UTC hour (0-23) and day of week (0=Sun, 6=Sat)
+  type HourBucket = { pnl: number; count: number; wins: number };
+  const hourBuckets: HourBucket[] = Array.from({ length: 24 }, () => ({ pnl: 0, count: 0, wins: 0 }));
+  const dowBuckets: HourBucket[] = Array.from({ length: 7 }, () => ({ pnl: 0, count: 0, wins: 0 }));
+  const dowNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  for (const trade of trades) {
+    const d = new Date(trade.createdAt * 1000);
+    const hour = d.getUTCHours();
+    const dow = d.getUTCDay();
+    const net = trade.realizedPnl - trade.fee;
+
+    hourBuckets[hour].pnl += net;
+    hourBuckets[hour].count++;
+    if (net > 0) hourBuckets[hour].wins++;
+
+    dowBuckets[dow].pnl += net;
+    dowBuckets[dow].count++;
+    if (net > 0) dowBuckets[dow].wins++;
+  }
+
+  const hourStats = hourBuckets.map((b, hour) => ({
+    hour_utc: hour,
+    label: `${String(hour).padStart(2, "0")}:00 UTC`,
+    trades: b.count,
+    net_pnl: b.count > 0 ? round2(b.pnl) : 0,
+    win_rate_pct: b.count > 0 ? round2((b.wins / b.count) * 100) : 0,
+    avg_pnl: b.count > 0 ? round2(b.pnl / b.count) : 0,
+  })).filter(h => h.trades > 0);
+
+  const dowStats = dowBuckets.map((b, dow) => ({
+    day: dowNames[dow],
+    day_index: dow,
+    trades: b.count,
+    net_pnl: b.count > 0 ? round2(b.pnl) : 0,
+    win_rate_pct: b.count > 0 ? round2((b.wins / b.count) * 100) : 0,
+    avg_pnl: b.count > 0 ? round2(b.pnl / b.count) : 0,
+  })).filter(d => d.trades > 0);
+
+  // Find best/worst
+  const sortedHours = [...hourStats].sort((a, b) => b.net_pnl - a.net_pnl);
+  const sortedDays = [...dowStats].sort((a, b) => b.net_pnl - a.net_pnl);
+
+  const bestHour = sortedHours[0] ?? null;
+  const worstHour = sortedHours[sortedHours.length - 1] ?? null;
+  const bestDay = sortedDays[0] ?? null;
+  const worstDay = sortedDays[sortedDays.length - 1] ?? null;
+
+  // Market session classification
+  function getSession(hour: number): string {
+    if (hour >= 0 && hour < 8) return "Asia";
+    if (hour >= 8 && hour < 16) return "Europe";
+    return "Americas";
+  }
+
+  const sessionBuckets: Record<string, HourBucket> = {
+    Asia: { pnl: 0, count: 0, wins: 0 },
+    Europe: { pnl: 0, count: 0, wins: 0 },
+    Americas: { pnl: 0, count: 0, wins: 0 },
+  };
+
+  for (const h of hourStats) {
+    const session = getSession(h.hour_utc);
+    sessionBuckets[session].pnl += h.net_pnl;
+    sessionBuckets[session].count += h.trades;
+    sessionBuckets[session].wins += Math.round(h.trades * h.win_rate_pct / 100);
+  }
+
+  const bySessions = Object.entries(sessionBuckets)
+    .filter(([_, b]) => b.count > 0)
+    .map(([session, b]) => ({
+      session,
+      hours_utc: session === "Asia" ? "00-08" : session === "Europe" ? "08-16" : "16-24",
+      trades: b.count,
+      net_pnl: round2(b.pnl),
+      win_rate_pct: b.count > 0 ? round2((b.wins / b.count) * 100) : 0,
+    }))
+    .sort((a, b) => b.net_pnl - a.net_pnl);
+
+  return c.json({
+    total_analyzed: trades.length,
+    best_hour: bestHour ? {
+      hour: bestHour.label,
+      net_pnl: bestHour.net_pnl,
+      win_rate_pct: bestHour.win_rate_pct,
+      tip: `Your most profitable hour. Consider prioritizing trades around ${bestHour.label}.`,
+    } : null,
+    worst_hour: worstHour ? {
+      hour: worstHour.label,
+      net_pnl: worstHour.net_pnl,
+      tip: `Your least profitable hour. Consider avoiding or reducing size around ${worstHour.label}.`,
+    } : null,
+    best_day: bestDay ? {
+      day: bestDay.day,
+      net_pnl: bestDay.net_pnl,
+      win_rate_pct: bestDay.win_rate_pct,
+    } : null,
+    worst_day: worstDay ? {
+      day: worstDay.day,
+      net_pnl: worstDay.net_pnl,
+    } : null,
+    by_hour: hourStats,
+    by_day_of_week: dowStats,
+    by_market_session: bySessions,
+    note: "All times are UTC. Crypto markets are 24/7 but volatility patterns vary by session.",
+    disclaimer: "Past performance patterns don't guarantee future results. Sample size matters.",
+  });
+});
+
 export default app;
