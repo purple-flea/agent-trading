@@ -78,6 +78,24 @@ setInterval(() => {
   }
 }, 300_000);
 
+// ─── Global error handler ───
+app.onError((err, c) => {
+  const msg = err.message || "Internal server error";
+  console.error(`[error] ${c.req.method} ${c.req.path}: ${msg}`);
+  if (msg.includes("JSON") || msg.includes("json") || msg.includes("parse")) {
+    return c.json({ error: "invalid_json", message: "Request body must be valid JSON" }, 400);
+  }
+  return c.json({ error: "internal_error", message: "An unexpected error occurred" }, 500);
+});
+
+// ─── 404 handler ───
+app.notFound((c) => c.json({
+  error: "not_found",
+  message: `${c.req.method} ${c.req.path} not found`,
+  docs: "/v1/docs",
+  openapi: "/openapi.json",
+}, 404));
+
 app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
 app.use("/.well-known/llms.txt", serveStatic({ path: "public/llms.txt" }));
