@@ -67,6 +67,7 @@ const alterMigrations = [
   "ALTER TABLE agents ADD COLUMN hl_wallet_address TEXT",
   "ALTER TABLE agents ADD COLUMN hl_signing_key_encrypted TEXT",
   "ALTER TABLE agents ADD COLUMN builder_approved INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE agents ADD COLUMN generated_wallet INTEGER NOT NULL DEFAULT 0",
 ];
 
 export function runMigrations() {

@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import * as schema from "../db/schema.js";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { agentAuth } from "../middleware/auth.js";
-import { decryptKey } from "../engine/crypto.js";
+import { decryptKey, decryptKeyCbc } from "../engine/crypto.js";
 import {
   submitMarketOrder,
   submitCloseOrder,
@@ -27,6 +27,10 @@ function round2(n: number): number {
 function getSigningKey(agent: typeof schema.agents.$inferSelect): string {
   if (!agent.hlSigningKeyEncrypted || !agent.hlWalletAddress) {
     throw new Error("Hyperliquid wallet not configured. Register with hl_wallet_address and hl_signing_key for real execution.");
+  }
+  // Auto-generated wallets use AES-256-CBC (service key); user-supplied wallets use AES-256-GCM (env key)
+  if (agent.generatedWallet === 1) {
+    return decryptKeyCbc(agent.hlSigningKeyEncrypted);
   }
   return decryptKey(agent.hlSigningKeyEncrypted);
 }
@@ -1408,6 +1412,152 @@ app.get("/correlation", (c) => {
     },
     note: "Correlation based on daily realized PnL patterns from your trades. Not the same as price correlation.",
     tip: "Reduce position size in highly correlated markets to avoid hidden concentration risk.",
+  });
+});
+
+// ─── GET /position-size — position sizing calculator (Kelly, fixed-risk, fixed-fraction) ───
+
+app.get("/position-size", agentAuth, async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const accountSizeStr = c.req.query("account_size");
+  const riskPctStr = c.req.query("risk_pct");
+  const entryPriceStr = c.req.query("entry_price");
+  const stopLossPriceStr = c.req.query("stop_loss_price");
+  const leverageStr = c.req.query("leverage");
+
+  if (!accountSizeStr || !riskPctStr || !entryPriceStr || !stopLossPriceStr) {
+    return c.json({
+      error: "missing_params",
+      message: "Required: account_size, risk_pct (0-100), entry_price, stop_loss_price",
+      example: "GET /v1/trade/position-size?account_size=10000&risk_pct=1&entry_price=50000&stop_loss_price=49000&leverage=1",
+      optional_params: {
+        leverage: "1-100 (default 1 = no leverage)",
+      },
+      methods_explained: {
+        fixed_risk: "Risk exactly risk_pct of account per trade. Most common method.",
+        kelly: "Kelly criterion: size based on your historical win rate and avg win/loss ratio.",
+        fixed_fraction: "Fixed fraction of account as margin (same as fixed_risk when leverage=1).",
+      },
+    }, 400);
+  }
+
+  const accountSize = parseFloat(accountSizeStr);
+  const riskPct = parseFloat(riskPctStr);
+  const entryPrice = parseFloat(entryPriceStr);
+  const stopLossPrice = parseFloat(stopLossPriceStr);
+  const leverage = Math.max(1, Math.min(100, parseFloat(leverageStr ?? "1") || 1));
+
+  if (isNaN(accountSize) || isNaN(riskPct) || isNaN(entryPrice) || isNaN(stopLossPrice)) {
+    return c.json({ error: "invalid_params", message: "All params must be valid numbers" }, 400);
+  }
+  if (riskPct <= 0 || riskPct > 100) {
+    return c.json({ error: "invalid_params", message: "risk_pct must be between 0 and 100" }, 400);
+  }
+  if (entryPrice <= 0 || stopLossPrice <= 0) {
+    return c.json({ error: "invalid_params", message: "entry_price and stop_loss_price must be positive" }, 400);
+  }
+  if (entryPrice === stopLossPrice) {
+    return c.json({ error: "invalid_params", message: "entry_price and stop_loss_price must differ" }, 400);
+  }
+
+  const riskAmountUsd = accountSize * (riskPct / 100);
+  const stopDistancePct = Math.abs(entryPrice - stopLossPrice) / entryPrice;
+  const stopDistanceUsd = riskAmountUsd; // how much we're willing to lose
+
+  // Fixed-risk position sizing: position size = risk_amount / stop_distance_pct
+  const fixedRiskPositionUsd = riskAmountUsd / stopDistancePct;
+  const fixedRiskSizeInAsset = fixedRiskPositionUsd / entryPrice;
+  const fixedRiskMarginRequired = fixedRiskPositionUsd / leverage;
+  const fixedRiskLeverage = fixedRiskPositionUsd / accountSize;
+
+  // Kelly criterion based on historical trade stats
+  let kellyResult = null;
+  const trades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+  }).from(schema.trades)
+    .where(eq(schema.trades.agentId, agentId))
+    .all();
+
+  if (trades.length >= 10) {
+    const netPnls = trades.map(t => t.realizedPnl - t.fee);
+    const wins = netPnls.filter(p => p > 0);
+    const losses = netPnls.filter(p => p <= 0);
+    const winRate = wins.length / netPnls.length;
+    const avgWin = wins.length > 0 ? wins.reduce((s, v) => s + v, 0) / wins.length : 0;
+    const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, v) => s + v, 0) / losses.length) : 0;
+
+    if (avgLoss > 0) {
+      const winLossRatio = avgWin / avgLoss;
+      // Kelly formula: f = (win_rate * win_loss_ratio - loss_rate) / win_loss_ratio
+      const lossRate = 1 - winRate;
+      const kellyFraction = (winRate * winLossRatio - lossRate) / winLossRatio;
+      const halfKelly = Math.max(0, kellyFraction / 2); // half-Kelly for safety
+      const kellyPositionUsd = halfKelly * accountSize / stopDistancePct;
+      const kellySizeInAsset = kellyPositionUsd / entryPrice;
+
+      kellyResult = {
+        win_rate_pct: Math.round(winRate * 10000) / 100,
+        win_loss_ratio: Math.round(winLossRatio * 100) / 100,
+        full_kelly_fraction_pct: Math.round(kellyFraction * 10000) / 100,
+        half_kelly_fraction_pct: Math.round(halfKelly * 10000) / 100,
+        position_size_usd: Math.round(kellyPositionUsd * 100) / 100,
+        size_in_asset: Math.round(kellySizeInAsset * 1e6) / 1e6,
+        margin_required: Math.round((kellyPositionUsd / leverage) * 100) / 100,
+        note: kellyFraction <= 0
+          ? "Kelly is negative — your historical edge is insufficient. Consider not trading or paper trading."
+          : "Using half-Kelly for reduced variance. Full Kelly maximizes long-run growth but with extreme drawdowns.",
+        trades_used: trades.length,
+      };
+    }
+  }
+
+  const isLong = entryPrice > stopLossPrice;
+  const riskRewardExamples = [1.5, 2, 3].map(rr => ({
+    rr_ratio: rr,
+    take_profit_price: isLong
+      ? Math.round((entryPrice + (entryPrice - stopLossPrice) * rr) * 100) / 100
+      : Math.round((entryPrice - (stopLossPrice - entryPrice) * rr) * 100) / 100,
+    potential_profit_usd: Math.round(riskAmountUsd * rr * 100) / 100,
+  }));
+
+  return c.json({
+    inputs: {
+      account_size: accountSize,
+      risk_pct: riskPct,
+      risk_amount_usd: Math.round(riskAmountUsd * 100) / 100,
+      entry_price: entryPrice,
+      stop_loss_price: stopLossPrice,
+      leverage,
+      direction: isLong ? "long" : "short",
+    },
+    stop_distance: {
+      price_distance: Math.round(Math.abs(entryPrice - stopLossPrice) * 100) / 100,
+      pct: Math.round(stopDistancePct * 10000) / 100,
+    },
+    fixed_risk_sizing: {
+      position_size_usd: Math.round(fixedRiskPositionUsd * 100) / 100,
+      size_in_asset: Math.round(fixedRiskSizeInAsset * 1e6) / 1e6,
+      margin_required: Math.round(fixedRiskMarginRequired * 100) / 100,
+      effective_leverage: Math.round(fixedRiskLeverage * 100) / 100,
+      max_loss_if_stopped_out: Math.round(riskAmountUsd * 100) / 100,
+      pct_of_account: riskPct,
+    },
+    kelly_sizing: kellyResult ?? {
+      note: `Need at least 10 closed trades for Kelly calculation (you have ${trades.length}). Use fixed_risk_sizing for now.`,
+    },
+    risk_reward_targets: riskRewardExamples,
+    risk_guidelines: {
+      conservative: "0.5-1% risk per trade — recommended for most agents",
+      moderate: "1-2% risk per trade — standard for experienced traders",
+      aggressive: "2-5% risk per trade — high risk, use only with strong edge",
+      reckless: ">5% per trade — avoid, one losing streak can destroy account",
+      your_risk_category:
+        riskPct <= 1 ? "conservative" :
+        riskPct <= 2 ? "moderate" :
+        riskPct <= 5 ? "aggressive" : "reckless",
+    },
   });
 });
 
