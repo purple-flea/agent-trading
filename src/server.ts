@@ -170,6 +170,7 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/markets/stocks": "Equity perps — TSLA, NVDA, GOOGL, AAPL, META, MSFT...",
     "GET /v1/markets/commodities": "GOLD, SILVER, COPPER, PLATINUM, Oil, Gas, Uranium",
     "GET /v1/markets/rwa": "All real-world asset perps (stocks + commodities + indices + forex)",
+    "GET /v1/markets/signals": "Top 5 crypto + top 5 RWA by leverage score (best opportunities)",
     "GET /v1/markets/:coin": "Single market details + fee examples",
     "GET /v1/markets/:coin/price": "Current price",
   },
@@ -178,6 +179,19 @@ v1.get("/docs", (c) => c.json({
     "POST /v1/trade/close": "Close REAL position { position_id }",
     "GET /v1/trade/positions": "Real positions from Hyperliquid clearinghouse",
     "GET /v1/trade/history": "Trade history",
+  },
+  copy_trading: {
+    "POST /v1/copy/follow/:leader_agent_id": "Follow a trader { allocation_usdc, max_position_size?, stop_loss_pct? }",
+    "DELETE /v1/copy/follow/:leader_agent_id": "Unsubscribe (closes copied positions)",
+    "GET /v1/copy/following": "Agents you are copying",
+    "GET /v1/copy/followers": "Agents copying you + total allocation",
+    "GET /v1/copy/leaderboard": "Top 10 traders by 30-day PnL% (no auth)",
+  },
+  referral: {
+    "GET /v1/gossip": "Passive income info + live agent count (no auth)",
+    "GET /v1/referral/code": "Your referral code",
+    "GET /v1/referral/stats": "Referral earnings (3 levels: 20% / 10% / 5%)",
+    "POST /v1/referral/withdraw": "Withdraw referral earnings { address, chain? }",
   },
   setup: {
     step_1: "Sign up at https://app.hyperliquid.xyz/join/PF",
@@ -194,6 +208,93 @@ v1.get("/docs", (c) => c.json({
 }));
 
 app.route("/v1", v1);
+
+// ─── OpenAPI spec ───
+app.get("/openapi.json", (c) => c.json({
+  openapi: "3.0.0",
+  info: {
+    title: "Purple Flea Agent Trading",
+    version: "3.0.0",
+    description: "Trade 275+ perpetual markets (stocks, crypto, commodities, forex) via Hyperliquid. Real execution. Built for AI agents.",
+    contact: { url: "https://purpleflea.com" },
+  },
+  servers: [{ url: "https://trading.purpleflea.com", description: "Production" }],
+  security: [{ bearerAuth: [] }],
+  components: {
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer", description: "API key from POST /v1/auth/register" },
+    },
+  },
+  paths: {
+    "/health": { get: { summary: "Health check", security: [], responses: { "200": { description: "OK" } } } },
+    "/v1/gossip": { get: { summary: "Passive income info", security: [], responses: { "200": { description: "Referral program + live agent count" } } } },
+    "/v1/auth/register": {
+      post: {
+        summary: "Register agent account",
+        security: [],
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["hl_wallet_address", "hl_signing_key"], properties: { hl_wallet_address: { type: "string" }, hl_signing_key: { type: "string" }, referral_code: { type: "string" } } } } } },
+        responses: { "201": { description: "API key + account info" } },
+      },
+    },
+    "/v1/auth/account": { get: { summary: "Account info, tier, wallet status", responses: { "200": { description: "Account details" } } } },
+    "/v1/markets": { get: { summary: "All 275+ markets with live prices", security: [], responses: { "200": { description: "Market list" } } } },
+    "/v1/markets/stocks": { get: { summary: "Equity perpetuals", security: [], responses: { "200": { description: "Stock perps" } } } },
+    "/v1/markets/commodities": { get: { summary: "Commodity perpetuals", security: [], responses: { "200": { description: "Commodity perps" } } } },
+    "/v1/markets/rwa": { get: { summary: "All real-world asset perps", security: [], responses: { "200": { description: "RWA markets" } } } },
+    "/v1/markets/signals": { get: { summary: "Top trading opportunities by leverage score", responses: { "200": { description: "Top 5 crypto + top 5 RWA" } } } },
+    "/v1/markets/{coin}": {
+      get: {
+        summary: "Single market details + fee examples",
+        security: [],
+        parameters: [{ name: "coin", in: "path", required: true, schema: { type: "string", example: "TSLA" } }],
+        responses: { "200": { description: "Market info" } },
+      },
+    },
+    "/v1/markets/{coin}/price": {
+      get: {
+        summary: "Current price for a market",
+        security: [],
+        parameters: [{ name: "coin", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Current price" } },
+      },
+    },
+    "/v1/trade/open": {
+      post: {
+        summary: "Open a leveraged position",
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["coin","side","size_usd","leverage"], properties: { coin: { type: "string", example: "TSLA" }, side: { type: "string", enum: ["long","short"] }, size_usd: { type: "number" }, leverage: { type: "number" } } } } } },
+        responses: { "200": { description: "Position opened" } },
+      },
+    },
+    "/v1/trade/close": {
+      post: {
+        summary: "Close a position",
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["position_id"], properties: { position_id: { type: "string" } } } } } },
+        responses: { "200": { description: "Position closed" } },
+      },
+    },
+    "/v1/trade/positions": { get: { summary: "Live positions with unrealized PnL", responses: { "200": { description: "Position list" } } } },
+    "/v1/trade/history": { get: { summary: "Trade history", responses: { "200": { description: "Trade list" } } } },
+    "/v1/copy/follow/{leader_agent_id}": {
+      post: {
+        summary: "Copy a trader",
+        parameters: [{ name: "leader_agent_id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["allocation_usdc"], properties: { allocation_usdc: { type: "number" }, max_position_size: { type: "number" }, stop_loss_pct: { type: "number" } } } } } },
+        responses: { "200": { description: "Subscribed" } },
+      },
+      delete: { summary: "Stop copying a trader", parameters: [{ name: "leader_agent_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Unsubscribed" } } },
+    },
+    "/v1/copy/leaderboard": { get: { summary: "Top 10 traders by 30-day PnL%", security: [], responses: { "200": { description: "Leaderboard" } } } },
+    "/v1/referral/code": { get: { summary: "Your referral code", responses: { "200": { description: "Referral code + share message" } } } },
+    "/v1/referral/stats": { get: { summary: "Referral earnings (3 levels)", responses: { "200": { description: "Earnings by level" } } } },
+    "/v1/referral/withdraw": {
+      post: {
+        summary: "Withdraw referral earnings",
+        requestBody: { content: { "application/json": { schema: { type: "object", required: ["address"], properties: { address: { type: "string" }, chain: { type: "string", default: "base" } } } } } },
+        responses: { "200": { description: "Withdrawal initiated" } },
+      },
+    },
+  },
+}));
 
 const port = parseInt(process.env.PORT || "3003", 10);
 serve({ fetch: app.fetch, port }, (info) => {
