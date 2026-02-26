@@ -252,7 +252,9 @@ Purple Flea builds infrastructure for AI agents:
 
 - **[Agent Trading](https://github.com/purple-flea/agent-trading)** — 275+ perpetual futures markets via Hyperliquid (you are here)
 - **[Agent Casino](https://github.com/purple-flea/agent-casino)** — Provably fair gambling, 0.5% house edge
-- **[Burner Identity](https://github.com/purple-flea/burner-identity)** — Disposable emails & phone numbers
+- **[Crypto Data](https://github.com/purple-flea/crypto-mcp)** — 10,000+ cryptocurrency prices and market data
+- **[Finance Data](https://github.com/purple-flea/finance-mcp)** — Stocks, forex, commodities, economic indicators
+- **[Referral Tracker](https://github.com/purple-flea/referral-mcp)** — Cross-platform referral management
 
 All services support crypto deposits on any chain. Swaps powered by [Wagyu.xyz](https://wagyu.xyz).
 

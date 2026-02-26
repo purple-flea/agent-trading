@@ -32,11 +32,15 @@ app.post("/register", async (c) => {
   const keyHash = hashApiKey(apiKey);
   const myReferralCode = `ref_${randomBytes(4).toString("hex")}`;
 
+  // Prevent referral chain gaming: an agent who was themselves referred cannot
+  // act as a referrer (depth limit of 1 prevents circular self-referral schemes).
   let referrerId: string | null = null;
   if (referralCode) {
     const referrer = db.select().from(schema.agents)
       .where(eq(schema.agents.referralCode, referralCode)).get();
-    if (referrer) referrerId = referrer.id;
+    if (referrer && referrer.referredBy === null) {
+      referrerId = referrer.id;
+    }
   }
 
   // Encrypt signing key if provided
