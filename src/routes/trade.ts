@@ -768,6 +768,99 @@ app.get("/size-calculator", (c) => {
   });
 });
 
+// GET /daily-report — daily trading summary: today + yesterday side by side
+app.get("/daily-report", async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const now = Math.floor(Date.now() / 1000);
+  const todayStartUtc = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+  const yesterdayStartUtc = todayStartUtc - 86400;
+
+  // Fetch trades for today and yesterday
+  const recentTrades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    sizeUsd: schema.trades.sizeUsd,
+    coin: schema.trades.coin,
+    side: schema.trades.side,
+    createdAt: schema.trades.createdAt,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, agentId),
+      sql`${schema.trades.createdAt} >= ${yesterdayStartUtc}`,
+    ))
+    .orderBy(schema.trades.createdAt)
+    .all();
+
+  const todayTrades = recentTrades.filter(t => t.createdAt >= todayStartUtc);
+  const yesterdayTrades = recentTrades.filter(t => t.createdAt >= yesterdayStartUtc && t.createdAt < todayStartUtc);
+
+  function summarize(trades: typeof recentTrades) {
+    if (trades.length === 0) return null;
+    const totalPnl = trades.reduce((s, t) => s + t.realizedPnl, 0);
+    const totalFees = trades.reduce((s, t) => s + t.fee, 0);
+    const netPnl = totalPnl - totalFees;
+    const wins = trades.filter(t => t.realizedPnl > 0).length;
+    const volume = trades.reduce((s, t) => s + t.sizeUsd, 0);
+    const bestTrade = trades.reduce((best, t) => t.realizedPnl > best.realizedPnl ? t : best, trades[0]);
+    const worstTrade = trades.reduce((worst, t) => t.realizedPnl < worst.realizedPnl ? t : worst, trades[0]);
+    return {
+      trades: trades.length,
+      wins,
+      losses: trades.length - wins,
+      win_rate_pct: round2((wins / trades.length) * 100),
+      volume_usd: round2(volume),
+      gross_pnl: round2(totalPnl),
+      fees: round2(totalFees),
+      net_pnl: round2(netPnl),
+      roi_pct: volume > 0 ? round2((netPnl / volume) * 100) : 0,
+      best_trade: { coin: bestTrade.coin.replace("xyz:", ""), pnl: round2(bestTrade.realizedPnl) },
+      worst_trade: { coin: worstTrade.coin.replace("xyz:", ""), pnl: round2(worstTrade.realizedPnl) },
+    };
+  }
+
+  const todaySummary = summarize(todayTrades);
+  const yesterdaySummary = summarize(yesterdayTrades);
+
+  // Live open positions value
+  const agent = db.select({
+    totalPnl: schema.agents.totalPnl,
+    totalVolume: schema.agents.totalVolume,
+  }).from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+
+  // Day-over-day comparison
+  let comparison: string | null = null;
+  if (todaySummary && yesterdaySummary) {
+    const pnlChange = todaySummary.net_pnl - yesterdaySummary.net_pnl;
+    comparison = pnlChange >= 0
+      ? `+$${round2(pnlChange)} better than yesterday`
+      : `-$${round2(Math.abs(pnlChange))} worse than yesterday`;
+  }
+
+  // Open positions count
+  const openPositions = db.select({ count: sql<number>`COUNT(*)` })
+    .from(schema.positions)
+    .where(and(eq(schema.positions.agentId, agentId), eq(schema.positions.status, "open")))
+    .get();
+
+  return c.json({
+    report_date: new Date().toISOString().slice(0, 10),
+    today: todaySummary ?? { trades: 0, message: "No trades today yet" },
+    yesterday: yesterdaySummary ?? { trades: 0, message: "No trades yesterday" },
+    day_over_day: comparison,
+    open_positions: openPositions?.count ?? 0,
+    all_time: {
+      total_pnl: round2(agent?.totalPnl ?? 0),
+      total_volume: round2(agent?.totalVolume ?? 0),
+    },
+    actions: {
+      view_positions: "GET /v1/trade/positions",
+      open_trade: "POST /v1/trade/open",
+      full_history: "GET /v1/trade/pnl-history?days=30",
+    },
+  });
+});
+
 // GET /drawdown — max drawdown and equity curve from closed trade history
 app.get("/drawdown", (c) => {
   const agentId = c.get("agentId") as string;
