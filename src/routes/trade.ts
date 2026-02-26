@@ -458,6 +458,14 @@ app.get("/portfolio", async (c) => {
         : distanceToLiq < 15 ? "high"
         : distanceToLiq < 30 ? "medium"
         : "low",
+      // Suggested stop-loss: 50% of the way to liquidation from entry
+      // Suggested take-profit: 2:1 reward-to-risk ratio
+      suggested_stop_loss: p.side === "long"
+        ? round2(p.entryPrice * (1 - liqMovePct * 0.5))
+        : round2(p.entryPrice * (1 + liqMovePct * 0.5)),
+      suggested_take_profit: p.side === "long"
+        ? round2(p.entryPrice * (1 + liqMovePct))
+        : round2(p.entryPrice * (1 - liqMovePct)),
     };
   }));
 
