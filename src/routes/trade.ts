@@ -77,6 +77,33 @@ app.post("/open", async (c) => {
     }, 400);
   }
 
+  // Daily loss limit check
+  if (agent.maxDailyLossUsd != null && agent.maxDailyLossUsd > 0) {
+    const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+    const todayPnl = db.select({
+      netPnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl} - ${schema.trades.fee}), 0)`,
+    }).from(schema.trades)
+      .where(and(
+        eq(schema.trades.agentId, agentId),
+        sql`${schema.trades.createdAt} >= ${todayStart}`,
+      ))
+      .get();
+
+    const dailyLoss = Math.min(0, todayPnl?.netPnl ?? 0); // negative = loss
+    const currentLoss = Math.abs(dailyLoss);
+
+    if (currentLoss >= agent.maxDailyLossUsd) {
+      return c.json({
+        error: "daily_loss_limit_reached",
+        message: `Daily loss limit of $${agent.maxDailyLossUsd} reached. Trading blocked until UTC midnight.`,
+        daily_loss_limit_usd: agent.maxDailyLossUsd,
+        current_daily_loss_usd: Math.round(currentLoss * 100) / 100,
+        resets_at: new Date(new Date().setUTCHours(24, 0, 0, 0)).toISOString(),
+        tip: "Update your limit via POST /v1/trade/risk-settings",
+      }, 403);
+    }
+  }
+
   let signingKey: string;
   try {
     signingKey = getSigningKey(agent);
@@ -1412,6 +1439,116 @@ app.get("/correlation", (c) => {
     },
     note: "Correlation based on daily realized PnL patterns from your trades. Not the same as price correlation.",
     tip: "Reduce position size in highly correlated markets to avoid hidden concentration risk.",
+  });
+});
+
+// ─── GET /risk-settings — view current risk controls ───
+
+app.get("/risk-settings", agentAuth, (c) => {
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+  const agentId = c.get("agentId") as string;
+
+  // Compute today's PnL to show progress vs daily limit
+  const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+  const todayPnl = db.select({
+    netPnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl} - ${schema.trades.fee}), 0)`,
+    tradeCount: sql<number>`COUNT(*)`,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, agentId),
+      sql`${schema.trades.createdAt} >= ${todayStart}`,
+    ))
+    .get();
+
+  const dailyNetPnl = Math.round((todayPnl?.netPnl ?? 0) * 100) / 100;
+  const dailyLoss = Math.min(0, dailyNetPnl);
+  const currentLoss = Math.abs(dailyLoss);
+  const limit = agent.maxDailyLossUsd;
+  const blocked = limit != null && limit > 0 && currentLoss >= limit;
+
+  return c.json({
+    risk_settings: {
+      max_leverage: agent.maxLeverage,
+      max_position_usd: agent.maxPositionUsd,
+      max_daily_loss_usd: limit ?? null,
+    },
+    today: {
+      net_pnl: dailyNetPnl,
+      current_loss_usd: Math.round(currentLoss * 100) / 100,
+      trade_count: todayPnl?.tradeCount ?? 0,
+      daily_loss_limit_pct_used: limit != null && limit > 0
+        ? Math.round((currentLoss / limit) * 10000) / 100
+        : null,
+      trading_blocked: blocked,
+      resets_at: new Date(new Date().setUTCHours(24, 0, 0, 0)).toISOString(),
+    },
+    update_tip: "POST /v1/trade/risk-settings { max_daily_loss_usd: 500 } to set a daily loss limit",
+  });
+});
+
+// ─── POST /risk-settings — update daily loss limit and other risk controls ───
+
+app.post("/risk-settings", agentAuth, async (c) => {
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json() as any;
+
+  const updates: Partial<typeof schema.agents.$inferInsert> = {};
+  const changed: string[] = [];
+
+  if ("max_daily_loss_usd" in body) {
+    const val = body.max_daily_loss_usd;
+    if (val === null) {
+      updates.maxDailyLossUsd = null;
+      changed.push("max_daily_loss_usd: disabled (no limit)");
+    } else if (typeof val === "number" && val > 0) {
+      updates.maxDailyLossUsd = val;
+      changed.push(`max_daily_loss_usd: $${val}`);
+    } else {
+      return c.json({ error: "invalid_value", message: "max_daily_loss_usd must be a positive number or null to disable" }, 400);
+    }
+  }
+
+  if ("max_leverage" in body) {
+    const val = body.max_leverage;
+    if (typeof val !== "number" || val < 1 || val > 50) {
+      return c.json({ error: "invalid_value", message: "max_leverage must be 1-50" }, 400);
+    }
+    const maxAllowed = agent.tier === "free" ? 20 : 50;
+    const capped = Math.min(val, maxAllowed);
+    updates.maxLeverage = capped;
+    changed.push(`max_leverage: ${capped}x`);
+  }
+
+  if ("max_position_usd" in body) {
+    const val = body.max_position_usd;
+    if (typeof val !== "number" || val <= 0) {
+      return c.json({ error: "invalid_value", message: "max_position_usd must be a positive number" }, 400);
+    }
+    const maxAllowed = agent.tier === "free" ? 50000 : 500000;
+    const capped = Math.min(val, maxAllowed);
+    updates.maxPositionUsd = capped;
+    changed.push(`max_position_usd: $${capped}`);
+  }
+
+  if (changed.length === 0) {
+    return c.json({
+      error: "no_changes",
+      message: "Provide at least one of: max_daily_loss_usd, max_leverage, max_position_usd",
+    }, 400);
+  }
+
+  db.update(schema.agents).set(updates).where(eq(schema.agents.id, agentId)).run();
+
+  return c.json({
+    success: true,
+    changed,
+    risk_settings: {
+      max_leverage: updates.maxLeverage ?? agent.maxLeverage,
+      max_position_usd: updates.maxPositionUsd ?? agent.maxPositionUsd,
+      max_daily_loss_usd: "maxDailyLossUsd" in updates ? updates.maxDailyLossUsd : agent.maxDailyLossUsd,
+    },
+    note: "Daily loss limit blocks new trade opens until UTC midnight when limit is reached.",
   });
 });
 

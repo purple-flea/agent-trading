@@ -10,6 +10,7 @@ export const agents = sqliteTable("agents", {
   builderApproved: integer("builder_approved").default(0).notNull(), // 1 if builder fee approved on HL
   maxLeverage: integer("max_leverage").default(10).notNull(),
   maxPositionUsd: real("max_position_usd").default(10000).notNull(),
+  maxDailyLossUsd: real("max_daily_loss_usd"), // null = no limit
   totalVolume: real("total_volume").default(0).notNull(),
   totalFeesPaid: real("total_fees_paid").default(0).notNull(),
   totalPnl: real("total_pnl").default(0).notNull(),
