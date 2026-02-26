@@ -100,6 +100,9 @@ app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
 app.use("/.well-known/llms.txt", serveStatic({ path: "public/llms.txt" }));
 
+// ─── favicon.ico — 204 to suppress 404 log noise ───
+app.get("/favicon.ico", (c) => new Response(null, { status: 204 }));
+
 // ─── robots.txt ───
 app.get("/robots.txt", (c) => {
   c.header("Content-Type", "text/plain");
@@ -228,6 +231,9 @@ v1.get("/public-stats", (c) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// ─── /v1/stats alias (some agents probe this) ───
+v1.get("/stats", (c) => c.redirect("/v1/public-stats", 301));
 
 // ─── Gossip (no auth) ───
 v1.get("/gossip", (c) => {
