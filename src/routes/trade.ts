@@ -598,6 +598,52 @@ app.get("/pnl-history", (c) => {
   });
 });
 
+// GET /stats-by-coin — per-coin trading statistics for the agent
+app.get("/stats-by-coin", (c) => {
+  const agentId = c.get("agentId") as string;
+  const limit = Math.min(parseInt(c.req.query("limit") || "20"), 100);
+
+  const coinStats = db.select({
+    coin: schema.trades.coin,
+    totalTrades: sql<number>`COUNT(*)`,
+    wins: sql<number>`SUM(CASE WHEN ${schema.trades.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+    totalPnl: sql<number>`COALESCE(SUM(${schema.trades.realizedPnl}), 0)`,
+    totalVolume: sql<number>`COALESCE(SUM(${schema.trades.sizeUsd}), 0)`,
+    totalFees: sql<number>`COALESCE(SUM(${schema.trades.fee}), 0)`,
+    bestTrade: sql<number>`COALESCE(MAX(${schema.trades.realizedPnl}), 0)`,
+    worstTrade: sql<number>`COALESCE(MIN(${schema.trades.realizedPnl}), 0)`,
+  })
+    .from(schema.trades)
+    .where(eq(schema.trades.agentId, agentId))
+    .groupBy(schema.trades.coin)
+    .orderBy(desc(sql`SUM(${schema.trades.realizedPnl})`))
+    .limit(limit)
+    .all();
+
+  const totalPnlAll = coinStats.reduce((sum, c) => sum + c.totalPnl, 0);
+
+  return c.json({
+    by_coin: coinStats.map(s => ({
+      coin: s.coin,
+      ticker: s.coin.replace("xyz:", ""),
+      total_trades: s.totalTrades,
+      win_rate_pct: s.totalTrades > 0 ? round2((s.wins / s.totalTrades) * 100) : 0,
+      total_pnl: round2(s.totalPnl),
+      total_volume: round2(s.totalVolume),
+      total_fees: round2(s.totalFees),
+      net_pnl: round2(s.totalPnl - s.totalFees),
+      best_trade: round2(s.bestTrade),
+      worst_trade: round2(s.worstTrade),
+      pnl_share_pct: totalPnlAll !== 0 ? round2((s.totalPnl / Math.abs(totalPnlAll)) * 100) : 0,
+    })),
+    total_coins_traded: coinStats.length,
+    portfolio_pnl: round2(totalPnlAll),
+    best_coin: coinStats.length > 0 ? coinStats[0].coin.replace("xyz:", "") : null,
+    worst_coin: coinStats.length > 0 ? coinStats[coinStats.length - 1].coin.replace("xyz:", "") : null,
+    note: coinStats.length === 0 ? "No closed trades yet. Open and close positions to see stats." : null,
+  });
+});
+
 // GET /size-calculator — position sizing and risk management calculator (no external calls)
 app.get("/size-calculator", (c) => {
   const agentId = c.get("agentId") as string;
