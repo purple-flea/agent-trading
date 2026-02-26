@@ -20,21 +20,28 @@ app.get("/code", (c) => {
 
 app.get("/stats", (c) => {
   const agentId = c.get("agentId") as string;
-  
+
   const earnings = db
     .select()
     .from(schema.referralEarnings)
     .where(eq(schema.referralEarnings.referrerId, agentId))
+    .limit(10000)
     .all();
 
   const totalEarned = earnings.reduce((sum, e) => sum + e.commissionAmount, 0);
   const totalFees = earnings.reduce((sum, e) => sum + e.feeAmount, 0);
 
-  // Count unique referred agents
-  const uniqueReferred = new Set(earnings.map(e => e.referredId)).size;
+  // Count referrals from agents table (referredBy), not from referralEarnings —
+  // earnings only exist once a referred agent has traded, so using earnings would
+  // show 0 referrals for agents who referred someone who hasn't traded yet.
+  const referredAgents = db
+    .select()
+    .from(schema.agents)
+    .where(eq(schema.agents.referredBy, agentId))
+    .all();
 
   return c.json({
-    total_referrals: uniqueReferred,
+    total_referrals: referredAgents.length,
     total_fees_generated_usd: Math.round(totalFees * 100) / 100,
     total_earned_usd: Math.round(totalEarned * 100) / 100,
     commission_rate: "20%",
@@ -48,15 +55,13 @@ app.get("/stats", (c) => {
   });
 });
 
-export default app;
-
 app.post("/withdraw", async (c) => {
   const agentId = c.get("agentId") as string;
   const agent = c.get("agent") as typeof schema.agents.$inferSelect;
   const { address } = await c.req.json().catch(() => ({} as any));
 
-  if (!address || !address.startsWith("0x") || address.length !== 42) {
-    return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x...)" }, 400);
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x followed by 40 hex characters)" }, 400);
   }
 
   // Calculate total earned - total already withdrawn
@@ -105,3 +110,5 @@ app.post("/withdraw", async (c) => {
     note: "Referral commission withdrawal queued. USDC will be sent to your address within 24h.",
   });
 });
+
+export default app;
