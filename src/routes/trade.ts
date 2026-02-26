@@ -768,4 +768,144 @@ app.get("/size-calculator", (c) => {
   });
 });
 
+// GET /drawdown — max drawdown and equity curve from closed trade history
+app.get("/drawdown", (c) => {
+  const agentId = c.get("agentId") as string;
+  const days = Math.min(parseInt(c.req.query("days") ?? "90") || 90, 365);
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+
+  const trades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    createdAt: schema.trades.createdAt,
+    coin: schema.trades.coin,
+  }).from(schema.trades)
+    .where(and(
+      eq(schema.trades.agentId, agentId),
+      sql`${schema.trades.createdAt} >= ${since}`,
+    ))
+    .orderBy(schema.trades.createdAt)
+    .all();
+
+  if (trades.length === 0) {
+    return c.json({
+      period_days: days,
+      message: "No closed trades in this period. Open and close positions to generate equity curve data.",
+      tip: `Use ?days=365 to look back further`,
+    });
+  }
+
+  // Build equity curve: running cumulative net PnL (after fees)
+  let equity = 0;
+  let peak = 0;
+  let maxDrawdown = 0;
+  let maxDrawdownStartIdx = 0;
+  let maxDrawdownEndIdx = 0;
+  let currentPeakIdx = 0;
+
+  const curve: Array<{
+    trade_num: number;
+    date: string;
+    coin: string;
+    net_pnl: number;
+    equity: number;
+    drawdown_from_peak: number;
+    drawdown_pct: number;
+  }> = [];
+
+  for (let i = 0; i < trades.length; i++) {
+    const t = trades[i];
+    const net = t.realizedPnl - t.fee;
+    equity = round2(equity + net);
+    const dd = equity - peak;
+    const ddPct = peak > 0 ? round2((dd / peak) * 100) : 0;
+
+    if (equity > peak) {
+      peak = equity;
+      currentPeakIdx = i;
+    }
+
+    if (dd < maxDrawdown) {
+      maxDrawdown = dd;
+      maxDrawdownStartIdx = currentPeakIdx;
+      maxDrawdownEndIdx = i;
+    }
+
+    curve.push({
+      trade_num: i + 1,
+      date: new Date(t.createdAt * 1000).toISOString().slice(0, 10),
+      coin: t.coin.replace("xyz:", ""),
+      net_pnl: round2(net),
+      equity,
+      drawdown_from_peak: round2(dd),
+      drawdown_pct: ddPct,
+    });
+  }
+
+  const finalEquity = curve[curve.length - 1]?.equity ?? 0;
+  const totalNetPnl = round2(trades.reduce((s, t) => s + t.realizedPnl - t.fee, 0));
+  const wins = trades.filter(t => t.realizedPnl > 0).length;
+
+  // Recovery factor: net PnL / max drawdown (higher = better)
+  const recoveryFactor = maxDrawdown < 0
+    ? round2(totalNetPnl / Math.abs(maxDrawdown))
+    : null;
+
+  // Calmar ratio: annualized return / max drawdown
+  const dailyReturn = totalNetPnl / days;
+  const annualizedReturn = dailyReturn * 365;
+  const calmarRatio = maxDrawdown < 0
+    ? round2(annualizedReturn / Math.abs(maxDrawdown))
+    : null;
+
+  // Consecutive losing trades (max)
+  let maxConsecLosses = 0;
+  let curConsecLosses = 0;
+  for (const t of trades) {
+    if (t.realizedPnl <= 0) { curConsecLosses++; maxConsecLosses = Math.max(maxConsecLosses, curConsecLosses); }
+    else curConsecLosses = 0;
+  }
+
+  const mddStartTrade = curve[maxDrawdownStartIdx];
+  const mddEndTrade = curve[maxDrawdownEndIdx];
+
+  return c.json({
+    period_days: days,
+    total_trades: trades.length,
+    summary: {
+      final_equity: finalEquity,
+      total_net_pnl: totalNetPnl,
+      win_rate_pct: round2((wins / trades.length) * 100),
+      max_drawdown_usd: round2(maxDrawdown),
+      max_drawdown_pct: peak > 0 ? round2((maxDrawdown / peak) * 100) : 0,
+      max_consec_losses: maxConsecLosses,
+      recovery_factor: recoveryFactor,
+      calmar_ratio: calmarRatio,
+      peak_equity: round2(peak),
+      drawdown_period: mddStartTrade && mddEndTrade ? {
+        from: mddStartTrade.date,
+        to: mddEndTrade.date,
+        trades_in_drawdown: maxDrawdownEndIdx - maxDrawdownStartIdx,
+      } : null,
+    },
+    equity_curve: curve,
+    interpretation: {
+      recovery_factor: recoveryFactor !== null
+        ? (recoveryFactor > 2 ? "Good (>2x): gains comfortably outweigh max drawdown"
+          : recoveryFactor > 1 ? "OK (>1x): net positive but drawdown was significant"
+          : "Poor (<1x): drawdown exceeded total gains")
+        : "N/A — no drawdown period",
+      calmar_ratio: calmarRatio !== null
+        ? (calmarRatio > 1 ? "Strong: annualized return > max drawdown"
+          : calmarRatio > 0.5 ? "Moderate: consider reducing position size"
+          : "Weak: high drawdown relative to returns")
+        : "N/A",
+      max_drawdown_guidance: maxDrawdown < 0
+        ? `Your max drawdown was $${Math.abs(round2(maxDrawdown))}. Consider stopping or reducing size when drawdown exceeds 20% of peak equity.`
+        : "No drawdown — all trades profitable so far (rare, be cautious of overconfidence)",
+    },
+    tip: "Use ?days=30 for recent performance or ?days=365 for full history",
+  });
+});
+
 export default app;
