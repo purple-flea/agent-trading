@@ -177,6 +177,46 @@ app.get("/signals", async (c) => {
   }
 });
 
+// GET /markets/multi-price?coins=BTC,ETH,SOL — batch price lookup (no auth)
+// NOTE: must be before /:coin wildcard
+app.get("/multi-price", async (c) => {
+  const coinsParam = c.req.query("coins") || "";
+  if (!coinsParam) {
+    return c.json({
+      error: "missing_coins",
+      message: "Provide ?coins=BTC,ETH,SOL (comma-separated, max 20)",
+      example: "GET /v1/markets/multi-price?coins=BTC,ETH,SOL,TSLA,GOLD",
+    }, 400);
+  }
+
+  const requestedCoins = coinsParam.split(",").map(s => s.trim().toUpperCase()).slice(0, 20);
+  const allPrices = await getAllPrices();
+
+  const results = await Promise.all(requestedCoins.map(async (rawCoin) => {
+    const resolved = await resolveCoin(rawCoin).catch(() => null);
+    if (!resolved) return { coin: rawCoin, error: "not_found" };
+    const priceStr = allPrices[resolved.canonical];
+    return {
+      coin: resolved.canonical,
+      ticker: resolved.canonical.replace("xyz:", ""),
+      price: priceStr ? parseFloat(priceStr) : null,
+      category: resolved.market.category,
+      max_leverage: resolved.market.maxLeverage,
+    };
+  }));
+
+  const found = results.filter(r => !("error" in r));
+  const notFound = results.filter(r => "error" in r).map(r => (r as any).coin);
+
+  c.header("Cache-Control", "public, max-age=5");
+  return c.json({
+    prices: found,
+    ...(notFound.length > 0 ? { not_found: notFound } : {}),
+    count: found.length,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // GET /markets/summary — quick market conditions overview (no auth)
 // NOTE: must be before /:coin wildcard
 app.get("/summary", async (c) => {
