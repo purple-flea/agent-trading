@@ -465,9 +465,6 @@ app.get("/leaderboard", (c) => {
     .all();
 
   const leaderboard = topTraders.map((t, i) => {
-    const agent = db.select({ totalVolume: schema.agents.totalVolume })
-      .from(schema.agents).where(eq(schema.agents.id, t.agentId)).get();
-
     const followerCount = db.select({ count: sql<number>`count(*)` })
       .from(schema.copySubscriptions)
       .where(and(
@@ -475,12 +472,26 @@ app.get("/leaderboard", (c) => {
         eq(schema.copySubscriptions.active, 1),
       )).get()?.count ?? 0;
 
-    const totalAllocated = db.select({ total: sql<number>`SUM(allocation_usdc)` })
+    const totalAllocated = db.select({ total: sql<number>`COALESCE(SUM(allocation_usdc), 0)` })
       .from(schema.copySubscriptions)
       .where(and(
         eq(schema.copySubscriptions.leaderId, t.agentId),
         eq(schema.copySubscriptions.active, 1),
       )).get()?.total ?? 0;
+
+    // Win rate in the same 30d window
+    const tradeStats = db.select({
+      total: sql<number>`COUNT(*)`,
+      wins: sql<number>`SUM(CASE WHEN ${schema.trades.realizedPnl} > 0 THEN 1 ELSE 0 END)`,
+    }).from(schema.trades)
+      .where(and(
+        eq(schema.trades.agentId, t.agentId),
+        sql`${schema.trades.createdAt} >= ${thirtyDaysAgo}`,
+      )).get();
+
+    const winRate = (tradeStats?.total ?? 0) > 0
+      ? round2(((tradeStats?.wins ?? 0) / tradeStats!.total) * 100)
+      : 0;
 
     const pnlPct = t.totalVolume > 0 ? round2((t.totalPnl / t.totalVolume) * 100) : 0;
 
@@ -489,12 +500,21 @@ app.get("/leaderboard", (c) => {
       agent_id: t.agentId,
       pnl_30d: round2(t.totalPnl),
       pnl_pct_30d: pnlPct,
+      win_rate_30d_pct: winRate,
+      trade_count_30d: tradeStats?.total ?? 0,
       total_followers: followerCount,
       total_allocated_usdc: round2(totalAllocated),
+      copy_this_trader: `POST /v1/copy/follow/${t.agentId}`,
+      stats_url: `/v1/copy/leader/${t.agentId}/stats`,
     };
   });
 
-  return c.json({ leaderboard, period: "30d", generated_at: Math.floor(Date.now() / 1000) });
+  return c.json({
+    leaderboard,
+    period: "30d",
+    generated_at: Math.floor(Date.now() / 1000),
+    how_to_copy: "POST /v1/copy/follow/:agent_id with { allocation_usdc, max_position_size?, stop_loss_pct? }",
+  }, 200, { "Cache-Control": "public, max-age=30" });
 });
 
 // ─── Internal: execute copy trades when leader opens position ───
