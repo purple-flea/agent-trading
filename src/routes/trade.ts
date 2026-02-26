@@ -425,6 +425,20 @@ app.get("/portfolio", async (c) => {
         : round2(p.sizeUsd * (-pnlRaw));
       pnlPct = round2(pnlRaw * 100 * (p.side === "long" ? 1 : -1));
     }
+    // Liquidation price estimate: position liquidates when loss = initial margin (1/leverage)
+    // For long: liq_price = entry * (1 - 1/leverage + 0.0005) (0.05% maintenance margin)
+    // For short: liq_price = entry * (1 + 1/leverage - 0.0005)
+    const maintenanceMargin = 0.0005;
+    const liqMovePct = 1 / p.leverage - maintenanceMargin;
+    const liquidationPrice = p.side === "long"
+      ? round2(p.entryPrice * (1 - liqMovePct))
+      : round2(p.entryPrice * (1 + liqMovePct));
+
+    // Distance to liquidation as % of current price
+    const distanceToLiq = currentPrice
+      ? round2(Math.abs(currentPrice - liquidationPrice) / currentPrice * 100)
+      : null;
+
     return {
       id: p.id,
       coin: p.coin,
@@ -437,6 +451,13 @@ app.get("/portfolio", async (c) => {
       unrealized_pnl: unrealizedPnl,
       pnl_pct: pnlPct,
       notional: currentPrice ? round2(Math.abs(p.sizeUsd / p.entryPrice * (currentPrice))) : null,
+      liquidation_price: liquidationPrice,
+      distance_to_liq_pct: distanceToLiq,
+      risk_level: distanceToLiq === null ? "unknown"
+        : distanceToLiq < 5 ? "critical"
+        : distanceToLiq < 15 ? "high"
+        : distanceToLiq < 30 ? "medium"
+        : "low",
     };
   }));
 
@@ -457,6 +478,20 @@ app.get("/portfolio", async (c) => {
     ? round2((closedStats.wins / closedStats.count) * 100)
     : null;
 
+  // Aggregate risk level across all positions
+  const criticalPositions = enriched.filter(p => p.risk_level === "critical").length;
+  const highRiskPositions = enriched.filter(p => p.risk_level === "high").length;
+  const portfolioRiskLevel = criticalPositions > 0 ? "critical"
+    : highRiskPositions > 0 ? "high"
+    : enriched.some(p => p.risk_level === "medium") ? "medium"
+    : enriched.length > 0 ? "low"
+    : "none";
+
+  const riskWarnings: string[] = [];
+  if (criticalPositions > 0) riskWarnings.push(`${criticalPositions} position(s) within 5% of liquidation — close or add margin immediately`);
+  if (highRiskPositions > 0) riskWarnings.push(`${highRiskPositions} position(s) within 15% of liquidation`);
+  if (agent.maxPositionUsd > 0 && totalExposure / agent.maxPositionUsd > 0.9) riskWarnings.push("Portfolio utilization >90% — near position limit");
+
   return c.json({
     summary: {
       open_positions: enriched.length,
@@ -468,6 +503,16 @@ app.get("/portfolio", async (c) => {
       unrealized_pnl: round2(totalUnrealizedPnl),
       max_position_usd: agent.maxPositionUsd,
       utilization_pct: agent.maxPositionUsd > 0 ? round2(totalExposure / agent.maxPositionUsd * 100) : 0,
+    },
+    risk: {
+      portfolio_risk_level: portfolioRiskLevel,
+      warnings: riskWarnings,
+      positions_by_risk: {
+        critical: criticalPositions,
+        high: highRiskPositions,
+        medium: enriched.filter(p => p.risk_level === "medium").length,
+        low: enriched.filter(p => p.risk_level === "low").length,
+      },
     },
     lifetime: {
       total_trades: closedStats?.count ?? 0,
