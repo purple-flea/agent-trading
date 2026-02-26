@@ -1442,6 +1442,114 @@ app.get("/correlation", (c) => {
   });
 });
 
+// ─── GET /market-timing — win rate by hour and day of week per coin ───
+
+app.get("/market-timing", agentAuth, (c) => {
+  const agentId = c.get("agentId") as string;
+  const coin = c.req.query("coin"); // optional filter
+
+  const trades = db.select({
+    realizedPnl: schema.trades.realizedPnl,
+    fee: schema.trades.fee,
+    createdAt: schema.trades.createdAt,
+    coin: schema.trades.coin,
+  }).from(schema.trades)
+    .where(coin
+      ? and(eq(schema.trades.agentId, agentId), eq(schema.trades.coin, coin))
+      : eq(schema.trades.agentId, agentId)
+    )
+    .all();
+
+  if (trades.length < 5) {
+    return c.json({
+      error: "insufficient_data",
+      message: `Need at least 5 closed trades${coin ? ` for ${coin}` : ""}. Have: ${trades.length}.`,
+    }, 404);
+  }
+
+  const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const SESSION_NAMES: Record<number, string> = {};
+  for (let h = 0; h < 24; h++) {
+    SESSION_NAMES[h] = h < 8 ? "Asia (00-08 UTC)" : h < 16 ? "Europe (08-16 UTC)" : "Americas (16-24 UTC)";
+  }
+
+  // Bucket by hour (0-23 UTC) and day of week (0=Sun)
+  type Bucket = { wins: number; total: number; netPnl: number };
+  const hourBuckets: Bucket[] = Array.from({ length: 24 }, () => ({ wins: 0, total: 0, netPnl: 0 }));
+  const dayBuckets: Bucket[] = Array.from({ length: 7 }, () => ({ wins: 0, total: 0, netPnl: 0 }));
+
+  for (const t of trades) {
+    const d = new Date(t.createdAt * 1000);
+    const hour = d.getUTCHours();
+    const day = d.getUTCDay();
+    const won = t.realizedPnl > 0;
+    const net = t.realizedPnl - t.fee;
+
+    hourBuckets[hour].total++;
+    hourBuckets[hour].netPnl += net;
+    if (won) hourBuckets[hour].wins++;
+
+    dayBuckets[day].total++;
+    dayBuckets[day].netPnl += net;
+    if (won) dayBuckets[day].wins++;
+  }
+
+  const toStats = (b: Bucket, label: string) => ({
+    label,
+    trades: b.total,
+    wins: b.wins,
+    win_rate_pct: b.total > 0 ? Math.round((b.wins / b.total) * 10000) / 100 : 0,
+    net_pnl: Math.round(b.netPnl * 100) / 100,
+  });
+
+  const hourStats = hourBuckets
+    .map((b, h) => toStats(b, `${String(h).padStart(2, "0")}:00 UTC`))
+    .filter(s => s.trades > 0);
+
+  const dayStats = dayBuckets
+    .map((b, d) => toStats(b, DAY_NAMES[d]))
+    .filter(s => s.trades > 0);
+
+  // Find best/worst hours and days (min 2 trades)
+  const qualifiedHours = hourStats.filter(s => s.trades >= 2);
+  const qualifiedDays = dayStats.filter(s => s.trades >= 2);
+
+  const bestHour = qualifiedHours.sort((a, b) => b.win_rate_pct - a.win_rate_pct)[0] ?? null;
+  const worstHour = [...qualifiedHours].sort((a, b) => a.win_rate_pct - b.win_rate_pct)[0] ?? null;
+  const bestDay = qualifiedDays.sort((a, b) => b.win_rate_pct - a.win_rate_pct)[0] ?? null;
+  const worstDay = [...qualifiedDays].sort((a, b) => a.win_rate_pct - b.win_rate_pct)[0] ?? null;
+
+  // Session aggregates
+  const sessionBuckets: Record<string, Bucket> = {
+    "Asia (00-08 UTC)": { wins: 0, total: 0, netPnl: 0 },
+    "Europe (08-16 UTC)": { wins: 0, total: 0, netPnl: 0 },
+    "Americas (16-24 UTC)": { wins: 0, total: 0, netPnl: 0 },
+  };
+  hourBuckets.forEach((b, h) => {
+    const sess = SESSION_NAMES[h];
+    sessionBuckets[sess].wins += b.wins;
+    sessionBuckets[sess].total += b.total;
+    sessionBuckets[sess].netPnl += b.netPnl;
+  });
+  const sessionStats = Object.entries(sessionBuckets)
+    .map(([label, b]) => toStats(b, label))
+    .filter(s => s.trades > 0);
+
+  return c.json({
+    coin: coin ?? "all",
+    total_trades_analyzed: trades.length,
+    best_hour: bestHour ? { hour: bestHour.label, win_rate_pct: bestHour.win_rate_pct, trades: bestHour.trades, session: SESSION_NAMES[parseInt(bestHour.label)] } : null,
+    worst_hour: worstHour ? { hour: worstHour.label, win_rate_pct: worstHour.win_rate_pct, trades: worstHour.trades } : null,
+    best_day: bestDay ? { day: bestDay.label, win_rate_pct: bestDay.win_rate_pct, trades: bestDay.trades } : null,
+    worst_day: worstDay ? { day: worstDay.label, win_rate_pct: worstDay.win_rate_pct, trades: worstDay.trades } : null,
+    by_session: sessionStats,
+    by_hour: hourStats.sort((a, b) => a.label.localeCompare(b.label)),
+    by_day_of_week: dayStats,
+    tip: coin ? `Filter by coin: ?coin=${coin}. Try other markets for comparison.` : "Filter by specific market: ?coin=BTC or ?coin=ETH",
+    note: "Win rate by time of day can reveal when you trade best. At least 2 trades per bucket for reliable data.",
+  });
+});
+
 // ─── GET /risk-settings — view current risk controls ───
 
 app.get("/risk-settings", agentAuth, (c) => {
