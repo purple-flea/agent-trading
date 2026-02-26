@@ -117,6 +117,22 @@ CREATE INDEX IF NOT EXISTS idx_copy_trades_sub ON copy_trades(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_orig ON copy_trades(original_position_id);
 `);
 
+// Auto-migration for trade journal
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS trade_notes (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  position_id TEXT REFERENCES positions(id),
+  note TEXT NOT NULL,
+  tags TEXT,
+  sentiment TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_notes_agent ON trade_notes(agent_id);
+CREATE INDEX IF NOT EXISTS idx_notes_position ON trade_notes(position_id);
+`);
+
 // Auto-migration for price alerts
 sqlite.exec(`
 CREATE TABLE IF NOT EXISTS price_alerts (

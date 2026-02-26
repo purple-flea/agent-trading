@@ -13,6 +13,7 @@ import referralRoutes from "./routes/referral.js";
 import copyRoutes from "./routes/copy.js";
 import watchlistRoutes from "./routes/watchlist.js";
 import alertsRoutes from "./routes/alerts.js";
+import journalRoutes from "./routes/journal.js";
 
 runMigrations();
 
@@ -280,6 +281,7 @@ v1.route("/referral", referralRoutes);
 v1.route("/copy", copyRoutes);
 v1.route("/watchlist", watchlistRoutes);
 v1.route("/alerts", alertsRoutes);
+v1.route("/journal", journalRoutes);
 
 // ─── Public stats (no auth) ───
 v1.get("/public-stats", (c) => {

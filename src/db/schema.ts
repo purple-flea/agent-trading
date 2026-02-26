@@ -125,6 +125,22 @@ export const copyTrades = sqliteTable("copy_trades", {
   index("idx_copy_trades_orig").on(table.originalPositionId),
 ]);
 
+// ─── Trade Journal ───
+
+export const tradeNotes = sqliteTable("trade_notes", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  positionId: text("position_id").references(() => positions.id),
+  note: text("note").notNull(), // agent's reasoning / strategy annotation
+  tags: text("tags"), // comma-separated tags: "momentum,breakout,earnings"
+  sentiment: text("sentiment"), // bullish | bearish | neutral
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+  updatedAt: integer("updated_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_notes_agent").on(table.agentId),
+  index("idx_notes_position").on(table.positionId),
+]);
+
 // ─── Price Alerts ───
 
 export const priceAlerts = sqliteTable("price_alerts", {
