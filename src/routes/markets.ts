@@ -177,6 +177,37 @@ app.get("/signals", async (c) => {
   }
 });
 
+// GET /markets/summary — quick market conditions overview (no auth)
+// NOTE: must be before /:coin wildcard
+app.get("/summary", async (c) => {
+  try {
+    const markets = await getMarkets();
+    const prices = await getAllPrices();
+
+    const cryptoMarkets = markets.filter(m => m.category === "crypto");
+    const rwaMarkets = markets.filter(m => m.category !== "crypto");
+
+    // Spot-check key markets
+    const keyMarketsToCheck = ["BTC", "ETH", "SOL", "xyz:TSLA", "xyz:GOLD", "xyz:NVDA"];
+    const snapshots = keyMarketsToCheck.map(coin => ({
+      ticker: coin.replace("xyz:", ""),
+      price: prices[coin] ? parseFloat(prices[coin]) : null,
+    })).filter(m => m.price !== null);
+
+    return c.json({
+      as_of: new Date().toISOString(),
+      total_markets: markets.length,
+      crypto_markets: cryptoMarkets.length,
+      rwa_markets: rwaMarkets.length,
+      key_prices: snapshots,
+      note: "Full market list at GET /v1/markets. Individual prices at GET /v1/markets/:coin/price",
+      signals: "GET /v1/markets/signals for top trading opportunities",
+    });
+  } catch (err: any) {
+    return c.json({ error: "summary_unavailable", message: err.message }, 503);
+  }
+});
+
 // GET /markets/:coin — single market
 app.get("/:coin", async (c) => {
   const coin = c.req.param("coin").toUpperCase();
