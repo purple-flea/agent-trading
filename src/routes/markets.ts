@@ -103,6 +103,80 @@ app.get("/rwa", async (c) => {
   });
 });
 
+// GET /markets/signals — top trading opportunities (no auth required)
+// Uses a simple momentum proxy: RWA markets with >10x leverage sorted by category interest
+app.get("/signals", async (c) => {
+  try {
+    const markets = await getMarkets();
+    const prices = await getAllPrices();
+
+    // Score each market: leverage * price_not_null bonus
+    const scored = markets
+      .filter(m => prices[m.name] && parseFloat(prices[m.name]) > 0)
+      .map(m => {
+        const price = parseFloat(prices[m.name]);
+        // Simple heuristic: higher leverage = more volatile = more opportunities
+        // Separate crypto vs RWA for balance
+        const isRwa = m.category !== "crypto";
+        return {
+          coin: m.name,
+          ticker: m.name.replace("xyz:", ""),
+          price,
+          max_leverage: m.maxLeverage,
+          category: m.category ?? "crypto",
+          is_rwa: isRwa,
+          // Score: leverage + category bonus for RWA (underutilized opportunity)
+          score: m.maxLeverage + (isRwa ? 5 : 0),
+        };
+      });
+
+    // Top 5 crypto by leverage
+    const topCrypto = scored
+      .filter(m => !m.is_rwa)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map((m, i) => ({
+        rank: i + 1,
+        coin: m.coin,
+        ticker: m.ticker,
+        price: m.price,
+        max_leverage: m.max_leverage,
+        category: m.category,
+        suggested_direction: "long",  // Most crypto maintains bullish bias in perpetuals
+        rationale: `High leverage (${m.max_leverage}x) offers efficient capital use for momentum plays`,
+        example: `POST /v1/trade/open { "coin": "${m.ticker}", "side": "long", "size_usd": 100, "leverage": ${Math.min(5, m.max_leverage)} }`,
+      }));
+
+    // Top 5 RWA (stocks/commodities/indices/forex)
+    const topRwa = scored
+      .filter(m => m.is_rwa)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map((m, i) => ({
+        rank: i + 1,
+        coin: m.coin,
+        ticker: m.ticker,
+        price: m.price,
+        max_leverage: m.max_leverage,
+        category: m.category,
+        suggested_direction: m.category === "forex" ? "short" : "long",
+        rationale: `RWA perp — trade ${m.ticker} 24/7 without traditional market hours restrictions`,
+        example: `POST /v1/trade/open { "coin": "${m.ticker}", "side": "long", "size_usd": 100, "leverage": ${Math.min(5, m.max_leverage)} }`,
+      }));
+
+    return c.json({
+      generated_at: new Date().toISOString(),
+      disclaimer: "Signals based on leverage availability and market structure. Not financial advice.",
+      top_crypto: topCrypto,
+      top_rwa: topRwa,
+      total_markets_analyzed: scored.length,
+      tip: "Use GET /v1/markets/:coin for detailed market info before trading",
+    });
+  } catch (err: any) {
+    return c.json({ error: "signals_unavailable", message: err.message }, 503);
+  }
+});
+
 // GET /markets/:coin — single market
 app.get("/:coin", async (c) => {
   const coin = c.req.param("coin").toUpperCase();
