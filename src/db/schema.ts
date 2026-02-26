@@ -95,3 +95,32 @@ export const referralWithdrawals = sqliteTable("referral_withdrawals", {
   status: text("status").default("pending").notNull(),
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
 });
+
+// ─── Copy Trading ───
+
+export const copySubscriptions = sqliteTable("copy_subscriptions", {
+  id: text("id").primaryKey(),
+  followerId: text("follower_id").notNull().references(() => agents.id),
+  leaderId: text("leader_id").notNull().references(() => agents.id),
+  allocationUsdc: real("allocation_usdc").notNull(),
+  maxPositionSize: real("max_position_size"),
+  stopLossPct: real("stop_loss_pct"),
+  active: integer("active").default(1).notNull(), // 1=active, 0=inactive
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_copy_sub_follower").on(table.followerId),
+  index("idx_copy_sub_leader").on(table.leaderId),
+  index("idx_copy_sub_active").on(table.active),
+]);
+
+export const copyTrades = sqliteTable("copy_trades", {
+  id: text("id").primaryKey(),
+  subscriptionId: text("subscription_id").notNull().references(() => copySubscriptions.id),
+  originalPositionId: text("original_position_id").notNull(),
+  followerPositionId: text("follower_position_id"),
+  status: text("status").default("open").notNull(), // open, closed, failed
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_copy_trades_sub").on(table.subscriptionId),
+  index("idx_copy_trades_orig").on(table.originalPositionId),
+]);

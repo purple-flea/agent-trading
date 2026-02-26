@@ -14,6 +14,7 @@ import {
   getAllHlPositions,
 } from "../engine/hyperliquid.js";
 import type { AppEnv } from "../types.js";
+import { executeCopyOpen, executeCopyClose } from "./copy.js";
 
 const app = new Hono<AppEnv>();
 app.use("/*", agentAuth);
@@ -137,6 +138,11 @@ app.post("/open", async (c) => {
       }
     }
 
+    // Copy trading: open proportional positions for all followers (async, non-blocking)
+    executeCopyOpen(agentId, posId, fill.coin, side, fill.sizeUsd, lev).catch((err) => {
+      console.warn("[copy] executeCopyOpen failed:", err.message);
+    });
+
     return c.json({
       position_id: posId,
       order_id: orderId,
@@ -243,6 +249,11 @@ app.post("/close", async (c) => {
         }).run();
       }
     }
+
+    // Copy trading: close proportional positions for all followers (async, non-blocking)
+    executeCopyClose(agentId, position_id).catch((err) => {
+      console.warn("[copy] executeCopyClose failed:", err.message);
+    });
 
     return c.json({
       position_id,

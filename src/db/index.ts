@@ -89,3 +89,30 @@ try {
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
   )`);
 } catch {}
+
+// Auto-migration for copy trading
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS copy_subscriptions (
+  id TEXT PRIMARY KEY,
+  follower_id TEXT NOT NULL REFERENCES agents(id),
+  leader_id TEXT NOT NULL REFERENCES agents(id),
+  allocation_usdc REAL NOT NULL,
+  max_position_size REAL,
+  stop_loss_pct REAL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS copy_trades (
+  id TEXT PRIMARY KEY,
+  subscription_id TEXT NOT NULL REFERENCES copy_subscriptions(id),
+  original_position_id TEXT NOT NULL,
+  follower_position_id TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_copy_sub_follower ON copy_subscriptions(follower_id);
+CREATE INDEX IF NOT EXISTS idx_copy_sub_leader ON copy_subscriptions(leader_id);
+CREATE INDEX IF NOT EXISTS idx_copy_sub_active ON copy_subscriptions(active);
+CREATE INDEX IF NOT EXISTS idx_copy_trades_sub ON copy_trades(subscription_id);
+CREATE INDEX IF NOT EXISTS idx_copy_trades_orig ON copy_trades(original_position_id);
+`);

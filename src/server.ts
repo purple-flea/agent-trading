@@ -8,13 +8,49 @@ import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
 import referralRoutes from "./routes/referral.js";
+import copyRoutes from "./routes/copy.js";
 
 runMigrations();
 
 const app = new Hono();
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["*"];
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["null"];
 app.use("*", cors({ origin: ALLOWED_ORIGINS }));
 app.use("*", logger());
+
+// ─── Simple in-process rate limiter (sliding window) ───
+const rateLimitBuckets = new Map<string, { count: number; windowStart: number }>();
+
+function rateLimit(maxRequests: number, windowMs: number) {
+  return async (c: Parameters<Parameters<typeof app.use>[1]>[0], next: () => Promise<void>) => {
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+      || c.req.header("x-real-ip")
+      || "unknown";
+    const key = `${c.req.path}:${ip}`;
+    const now = Date.now();
+    const bucket = rateLimitBuckets.get(key);
+
+    if (!bucket || now - bucket.windowStart > windowMs) {
+      rateLimitBuckets.set(key, { count: 1, windowStart: now });
+    } else {
+      bucket.count++;
+      if (bucket.count > maxRequests) {
+        return c.json(
+          { error: "rate_limited", message: `Too many requests. Limit: ${maxRequests} per ${windowMs / 1000}s` },
+          429
+        );
+      }
+    }
+    await next();
+  };
+}
+
+// Periodically clean up stale buckets (every 5 minutes)
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [key, bucket] of rateLimitBuckets) {
+    if (bucket.windowStart < cutoff) rateLimitBuckets.delete(key);
+  }
+}, 300_000);
 
 app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
@@ -43,10 +79,18 @@ app.get("/", (c) => c.json({
 }));
 
 const v1 = new Hono();
+
+// Rate limits on sensitive endpoints
+v1.use("/auth/register", rateLimit(10, 60_000));       // 10 registrations/min per IP
+v1.use("/trade/open", rateLimit(30, 60_000));           // 30 opens/min per IP
+v1.use("/trade/close", rateLimit(30, 60_000));          // 30 closes/min per IP
+v1.use("/referral/withdraw", rateLimit(5, 60_000));     // 5 referral withdrawals/min per IP
+
 v1.route("/auth", authRoutes);
 v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
 v1.route("/referral", referralRoutes);
+v1.route("/copy", copyRoutes);
 
 v1.get("/docs", (c) => c.json({
   version: "3.0.0 — Real Hyperliquid Execution",

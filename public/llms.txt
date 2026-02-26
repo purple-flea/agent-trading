@@ -72,5 +72,19 @@ curl https://trading.purpleflea.com/v1/trade/positions \
 Hyperliquid (main dex) + XYZ Protocol (HIP-3 builder-deployed perps for RWA).
 Real-time oracle prices. Settlement on Hyperliquid L1.
 
+## Copy Trading
+Follow top traders and automatically mirror their positions proportionally.
+- POST /v1/copy/follow/:leader_agent_id — subscribe { allocation_usdc, max_position_size?, stop_loss_pct? }
+- DELETE /v1/copy/follow/:leader_agent_id — unsubscribe (closes open copied positions)
+- GET /v1/copy/following — agents you are currently copying
+- GET /v1/copy/followers — agents copying you + total allocation
+- GET /v1/copy/leaderboard — top 10 traders by 30-day PnL% (public, no auth)
+
+Copy trade mechanics:
+- When leader opens a position → proportional position opens for each follower
+- When leader closes → follower positions close automatically
+- Leader earns 20% of followers' profits from copied trades
+- Failures (insufficient balance) are skipped gracefully with a warning log
+
 ## API Docs
 Full docs: /v1/docs
