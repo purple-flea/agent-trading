@@ -531,6 +531,143 @@ app.get("/portfolio", async (c) => {
   });
 });
 
+// GET /risk-check — risk assessment for current open positions
+app.get("/risk-check", async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const openPositions = db.select().from(schema.positions)
+    .where(and(eq(schema.positions.agentId, agentId), eq(schema.positions.status, "open")))
+    .all();
+
+  if (openPositions.length === 0) {
+    return c.json({
+      status: "no_positions",
+      overall_risk: "none",
+      message: "No open positions. All clear.",
+      open_a_trade: "POST /v1/trade/open",
+    });
+  }
+
+  // Enrich with current prices
+  const enriched = await Promise.all(openPositions.map(async (p) => {
+    const currentPrice = await getPrice(p.coin).catch(() => null);
+    let unrealizedPnl = 0;
+    let distanceToLiq: number | null = null;
+    if (currentPrice) {
+      const pnlRaw = (currentPrice - p.entryPrice) / p.entryPrice;
+      unrealizedPnl = p.side === "long"
+        ? round2(p.sizeUsd * pnlRaw)
+        : round2(p.sizeUsd * (-pnlRaw));
+      const maintenanceMargin = 0.0005;
+      const liqMovePct = 1 / p.leverage - maintenanceMargin;
+      const liquidationPrice = p.side === "long"
+        ? p.entryPrice * (1 - liqMovePct)
+        : p.entryPrice * (1 + liqMovePct);
+      distanceToLiq = round2(Math.abs(currentPrice - liquidationPrice) / currentPrice * 100);
+    }
+    return { ...p, currentPrice, unrealizedPnl, distanceToLiq };
+  }));
+
+  // Risk metrics
+  const totalExposure = enriched.reduce((s, p) => s + p.sizeUsd, 0);
+  const totalMargin = enriched.reduce((s, p) => s + p.marginUsed, 0);
+  const totalUnrealizedPnl = enriched.reduce((s, p) => s + p.unrealizedPnl, 0);
+
+  // Concentration risk: any single coin > 50% of total exposure
+  const exposureByCoins: Record<string, number> = {};
+  for (const p of enriched) {
+    exposureByCoins[p.coin] = (exposureByCoins[p.coin] ?? 0) + p.sizeUsd;
+  }
+  const concentrationRisk = Object.entries(exposureByCoins)
+    .map(([coin, exposure]) => ({
+      coin: coin.replace("xyz:", ""),
+      exposure: round2(exposure),
+      pct_of_total: round2((exposure / totalExposure) * 100),
+    }))
+    .filter(cc => cc.pct_of_total > 50);
+
+  // Direction risk
+  const netLong = enriched.filter(p => p.side === "long").reduce((s, p) => s + p.sizeUsd, 0);
+  const netShort = enriched.filter(p => p.side === "short").reduce((s, p) => s + p.sizeUsd, 0);
+  const netDirection = netLong > netShort ? "net_long" : netShort > netLong ? "net_short" : "balanced";
+  const directionRatio = totalExposure > 0 ? round2((netLong / totalExposure) * 100) : 50;
+
+  // Near-liquidation positions: distance to liq < 10%
+  const nearLiq = enriched.filter(p => p.distanceToLiq !== null && p.distanceToLiq < 10);
+  const highLeverage = enriched.filter(p => p.leverage > 10);
+
+  // Build warnings
+  const warnings: Array<{ severity: "critical" | "warning" | "info"; message: string; action?: string }> = [];
+
+  for (const p of nearLiq) {
+    warnings.push({
+      severity: "critical",
+      message: `${p.coin.replace("xyz:", "")} ${p.side} is ${p.distanceToLiq}% from liquidation`,
+      action: `Close: POST /v1/trade/close { "position_id": "${p.id}" }`,
+    });
+  }
+
+  if (concentrationRisk.length > 0) {
+    for (const r of concentrationRisk) {
+      warnings.push({
+        severity: "warning",
+        message: `${r.coin} is ${r.pct_of_total}% of total exposure ($${r.exposure})`,
+        action: "Diversify across multiple assets to reduce concentration risk",
+      });
+    }
+  }
+
+  if (highLeverage.length > 0) {
+    warnings.push({
+      severity: "warning",
+      message: `${highLeverage.length} position(s) using >10x leverage`,
+      action: "High leverage positions: " + highLeverage.map(p => p.coin.replace("xyz:", "")).join(", "),
+    });
+  }
+
+  if (totalUnrealizedPnl < 0 && Math.abs(totalUnrealizedPnl) > totalMargin * 0.5) {
+    warnings.push({
+      severity: "warning",
+      message: `Unrealized loss ($${round2(Math.abs(totalUnrealizedPnl))}) exceeds 50% of total margin ($${round2(totalMargin)})`,
+      action: "Consider reducing size to prevent forced liquidation",
+    });
+  }
+
+  if (warnings.length === 0) {
+    warnings.push({ severity: "info", message: "No risk alerts. Positions look healthy." });
+  }
+
+  const overallRisk = nearLiq.length > 0 ? "critical"
+    : warnings.some(w => w.severity === "warning") ? "elevated"
+    : "normal";
+
+  return c.json({
+    overall_risk: overallRisk,
+    open_positions: enriched.length,
+    summary: {
+      total_exposure_usd: round2(totalExposure),
+      total_margin_usd: round2(totalMargin),
+      unrealized_pnl: round2(totalUnrealizedPnl),
+      net_direction: netDirection,
+      long_pct: directionRatio,
+      short_pct: round2(100 - directionRatio),
+    },
+    warnings,
+    positions: enriched.map(p => ({
+      id: p.id,
+      coin: p.coin.replace("xyz:", ""),
+      side: p.side,
+      size_usd: round2(p.sizeUsd),
+      leverage: p.leverage,
+      entry_price: p.entryPrice,
+      current_price: p.currentPrice,
+      unrealized_pnl: round2(p.unrealizedPnl),
+      distance_to_liq_pct: p.distanceToLiq,
+    })),
+    tip: "Monitor with GET /v1/trade/portfolio. Close a position: POST /v1/trade/close",
+  });
+});
+
 // GET /pnl-history — daily cumulative PnL chart data
 app.get("/pnl-history", (c) => {
   const agentId = c.get("agentId") as string;
