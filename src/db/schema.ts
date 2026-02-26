@@ -124,3 +124,15 @@ export const copyTrades = sqliteTable("copy_trades", {
   index("idx_copy_trades_sub").on(table.subscriptionId),
   index("idx_copy_trades_orig").on(table.originalPositionId),
 ]);
+
+// ─── Watchlist ───
+
+export const watchlist = sqliteTable("watchlist", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  coin: text("coin").notNull(), // e.g. "BTC", "ETH", "TSLA"
+  note: text("note"), // optional agent note
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_watchlist_agent").on(table.agentId),
+]);

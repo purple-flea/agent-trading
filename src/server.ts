@@ -11,6 +11,7 @@ import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
 import referralRoutes from "./routes/referral.js";
 import copyRoutes from "./routes/copy.js";
+import watchlistRoutes from "./routes/watchlist.js";
 
 runMigrations();
 
@@ -156,7 +157,7 @@ app.get("/.well-known/agent.json", (c) => c.json({
   documentation: "https://trading.purpleflea.com/llms.txt",
   openapi: "https://trading.purpleflea.com/openapi.json",
   gossip: "https://trading.purpleflea.com/v1/gossip",
-  capabilities: ["perpetuals", "leverage", "copy-trading", "market-signals", "275-markets"],
+  capabilities: ["perpetuals", "leverage", "copy-trading", "market-signals", "watchlist", "275-markets"],
   referral: {
     program: "3-level",
     commission: "20% trade fees",
@@ -187,7 +188,7 @@ const PURPLEFLEA_NETWORK = {
       register: "POST /v1/auth/register",
       gossip: "/v1/gossip",
       llms: "/llms.txt",
-      capabilities: ["perpetuals", "leverage", "copy-trading", "275-markets"],
+      capabilities: ["perpetuals", "leverage", "copy-trading", "watchlist", "275-markets"],
     },
     {
       name: "Wallet",
@@ -276,6 +277,7 @@ v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
 v1.route("/referral", referralRoutes);
 v1.route("/copy", copyRoutes);
+v1.route("/watchlist", watchlistRoutes);
 
 // ─── Public stats (no auth) ───
 v1.get("/public-stats", (c) => {
@@ -342,6 +344,12 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/copy/following": "Agents you are copying",
     "GET /v1/copy/followers": "Agents copying you + total allocation",
     "GET /v1/copy/leaderboard": "Top 10 traders by 30-day PnL% (no auth)",
+  },
+  watchlist: {
+    "GET /v1/watchlist": "List watched coins with live prices",
+    "POST /v1/watchlist": "Add coin to watchlist { coin: 'BTC', note?: '...' }",
+    "DELETE /v1/watchlist/:coin": "Remove coin from watchlist",
+    "PATCH /v1/watchlist/:coin": "Update note { note: '...' }",
   },
   referral: {
     "GET /v1/gossip": "Passive income info + live agent count (no auth)",

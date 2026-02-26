@@ -116,3 +116,15 @@ CREATE INDEX IF NOT EXISTS idx_copy_sub_active ON copy_subscriptions(active);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_sub ON copy_trades(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_orig ON copy_trades(original_position_id);
 `);
+
+// Auto-migration for watchlist
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS watchlist (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  coin TEXT NOT NULL,
+  note TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_agent ON watchlist(agent_id);
+`);
