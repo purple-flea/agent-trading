@@ -100,6 +100,67 @@ app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
 app.use("/.well-known/llms.txt", serveStatic({ path: "public/llms.txt" }));
 
+// ─── robots.txt ───
+app.get("/robots.txt", (c) => {
+  c.header("Content-Type", "text/plain");
+  return c.text(`User-agent: *
+Allow: /
+Allow: /v1/gossip
+Allow: /v1/public-stats
+Allow: /v1/markets
+Allow: /llms.txt
+Allow: /openapi.json
+Allow: /health
+
+Sitemap: https://trading.purpleflea.com/sitemap.xml
+`);
+});
+
+// ─── sitemap.xml ───
+app.get("/sitemap.xml", (c) => {
+  c.header("Content-Type", "application/xml");
+  const urls = [
+    "/",
+    "/health",
+    "/v1/gossip",
+    "/v1/public-stats",
+    "/v1/markets",
+    "/v1/markets/stocks",
+    "/v1/markets/commodities",
+    "/v1/copy/leaderboard",
+    "/v1/docs",
+    "/openapi.json",
+    "/llms.txt",
+    "/changelog",
+  ];
+  const loc = (path: string) => `<url><loc>https://trading.purpleflea.com${path}</loc></url>`;
+  return c.text(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(loc).join("\n")}
+</urlset>`);
+});
+
+// ─── /.well-known/agent.json ───
+app.get("/.well-known/agent.json", (c) => c.json({
+  name: "Purple Flea Agent Trading",
+  description: "Real perpetual futures trading on Hyperliquid. 275+ markets including stocks, crypto, commodities. Built for AI agents.",
+  url: "https://trading.purpleflea.com",
+  version: "3.0.0",
+  type: "service",
+  category: "trading",
+  for_agents: true,
+  registration: "POST /v1/auth/register",
+  documentation: "https://trading.purpleflea.com/llms.txt",
+  openapi: "https://trading.purpleflea.com/openapi.json",
+  gossip: "https://trading.purpleflea.com/v1/gossip",
+  capabilities: ["perpetuals", "leverage", "copy-trading", "market-signals", "275-markets"],
+  referral: {
+    program: "3-level",
+    commission: "20% trade fees",
+    endpoint: "GET /v1/referral/code",
+  },
+}));
+
 const startTime = Date.now();
 app.get("/health", (c) => {
   let dbStatus = "ok";
