@@ -12,6 +12,7 @@ import tradeRoutes from "./routes/trade.js";
 import referralRoutes from "./routes/referral.js";
 import copyRoutes from "./routes/copy.js";
 import watchlistRoutes from "./routes/watchlist.js";
+import alertsRoutes from "./routes/alerts.js";
 
 runMigrations();
 
@@ -188,7 +189,7 @@ const PURPLEFLEA_NETWORK = {
       register: "POST /v1/auth/register",
       gossip: "/v1/gossip",
       llms: "/llms.txt",
-      capabilities: ["perpetuals", "leverage", "copy-trading", "watchlist", "275-markets"],
+      capabilities: ["perpetuals", "leverage", "copy-trading", "watchlist", "price-alerts", "275-markets"],
     },
     {
       name: "Wallet",
@@ -278,6 +279,7 @@ v1.route("/trade", tradeRoutes);
 v1.route("/referral", referralRoutes);
 v1.route("/copy", copyRoutes);
 v1.route("/watchlist", watchlistRoutes);
+v1.route("/alerts", alertsRoutes);
 
 // ─── Public stats (no auth) ───
 v1.get("/public-stats", (c) => {
@@ -344,6 +346,12 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/copy/following": "Agents you are copying",
     "GET /v1/copy/followers": "Agents copying you + total allocation",
     "GET /v1/copy/leaderboard": "Top 10 traders by 30-day PnL% (no auth)",
+  },
+  alerts: {
+    "GET /v1/alerts": "List price alerts + auto-check which have triggered",
+    "POST /v1/alerts": "Create alert { coin: 'BTC', direction: 'above'|'below', target_price: 100000 }",
+    "DELETE /v1/alerts/:id": "Delete a specific alert",
+    "DELETE /v1/alerts": "Clear all triggered (inactive) alerts",
   },
   watchlist: {
     "GET /v1/watchlist": "List watched coins with live prices",

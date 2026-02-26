@@ -125,6 +125,23 @@ export const copyTrades = sqliteTable("copy_trades", {
   index("idx_copy_trades_orig").on(table.originalPositionId),
 ]);
 
+// ─── Price Alerts ───
+
+export const priceAlerts = sqliteTable("price_alerts", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  coin: text("coin").notNull(),
+  direction: text("direction").notNull(), // "above" | "below"
+  targetPrice: real("target_price").notNull(),
+  note: text("note"),
+  active: integer("active").default(1).notNull(), // 1=active, 0=triggered
+  triggeredAt: integer("triggered_at"),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_alerts_agent").on(table.agentId),
+  index("idx_alerts_active").on(table.active),
+]);
+
 // ─── Watchlist ───
 
 export const watchlist = sqliteTable("watchlist", {
