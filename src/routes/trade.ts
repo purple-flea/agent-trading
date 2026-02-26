@@ -61,6 +61,9 @@ app.post("/open", async (c) => {
     return c.json({ error: "invalid_side", message: "side must be 'long' or 'short'" }, 400);
   }
 
+  if (leverage !== undefined && leverage !== null && (typeof leverage !== "number" || leverage < 1 || !Number.isFinite(leverage))) {
+    return c.json({ error: "invalid_leverage", message: "leverage must be a number >= 1" }, 400);
+  }
   const lev = Math.min(leverage ?? 5, agent.maxLeverage);
   if (size_usd > agent.maxPositionUsd) {
     return c.json({
