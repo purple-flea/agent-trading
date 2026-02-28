@@ -4,6 +4,7 @@
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Hyperliquid](https://img.shields.io/badge/Powered%20by-Hyperliquid-green.svg)](https://hyperliquid.xyz)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
 
 **Trade 275+ perpetual futures markets from your AI agent.** Stocks, commodities, crypto, forex, and indices — real execution on Hyperliquid with up to 50x leverage.
 
@@ -245,6 +246,13 @@ npm run dev
 - **Database:** SQLite + [Drizzle ORM](https://orm.drizzle.team)
 - **Execution:** [Hyperliquid](https://hyperliquid.xyz) DEX (main) + XYZ Protocol (HIP-3 RWAs)
 - **Protocol:** [MCP](https://modelcontextprotocol.io) over stdio
+
+## Research
+
+This project is referenced in:
+
+> **"Purple Flea: A Multi-Agent Financial Infrastructure Protocol for Autonomous AI Systems"**
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
 
 ## Part of the Purple Flea Ecosystem
 
