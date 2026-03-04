@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import { getMarkets, getMarketsByCategory, getAllPrices, getPrice, resolveCoin, calculateFee } from "../engine/hyperliquid.js";
+import { db } from "../db/index.js";
+import { positions } from "../db/schema.js";
+import { eq, sql } from "drizzle-orm";
 
 const app = new Hono();
 
@@ -520,6 +523,57 @@ app.get("/screener", async (c) => {
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ error: "screener_unavailable", message }, 503);
   }
+});
+
+// GET /markets/oi — open interest by market (must be BEFORE /:coin wildcard)
+app.get("/oi", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const openPositions = db
+    .select({ coin: positions.coin, side: positions.side, sizeUsd: positions.sizeUsd })
+    .from(positions)
+    .where(eq(positions.status, "open"))
+    .all();
+
+  const byMarket: Record<string, { longUsd: number; shortUsd: number; longCount: number; shortCount: number }> = {};
+  for (const pos of openPositions) {
+    if (!byMarket[pos.coin]) byMarket[pos.coin] = { longUsd: 0, shortUsd: 0, longCount: 0, shortCount: 0 };
+    if (pos.side === "long") { byMarket[pos.coin].longUsd += pos.sizeUsd; byMarket[pos.coin].longCount++; }
+    else { byMarket[pos.coin].shortUsd += pos.sizeUsd; byMarket[pos.coin].shortCount++; }
+  }
+
+  const totalLong = openPositions.filter(p => p.side === "long").reduce((s, p) => s + p.sizeUsd, 0);
+  const totalShort = openPositions.filter(p => p.side === "short").reduce((s, p) => s + p.sizeUsd, 0);
+
+  const markets = Object.entries(byMarket)
+    .map(([coin, d]) => ({
+      coin,
+      total_oi_usd: Math.round((d.longUsd + d.shortUsd) * 100) / 100,
+      long_usd: Math.round(d.longUsd * 100) / 100,
+      short_usd: Math.round(d.shortUsd * 100) / 100,
+      long_positions: d.longCount,
+      short_positions: d.shortCount,
+      long_short_ratio: d.shortUsd > 0 ? Math.round(d.longUsd / d.shortUsd * 100) / 100 : null,
+      sentiment: d.longUsd > d.shortUsd * 1.5 ? "strongly_long" : d.longUsd > d.shortUsd ? "net_long" :
+                 d.shortUsd > d.longUsd * 1.5 ? "strongly_short" : "net_short",
+    }))
+    .sort((a, b) => b.total_oi_usd - a.total_oi_usd);
+
+  return c.json({
+    service: "agent-trading",
+    open_interest: {
+      total_oi_usd: Math.round((totalLong + totalShort) * 100) / 100,
+      total_long_usd: Math.round(totalLong * 100) / 100,
+      total_short_usd: Math.round(totalShort * 100) / 100,
+      long_short_ratio: totalShort > 0 ? Math.round(totalLong / totalShort * 100) / 100 : null,
+      platform_sentiment: totalLong >= totalShort ? "net_long" : "net_short",
+      total_open_positions: openPositions.length,
+    },
+    by_market: markets,
+    note: "Open interest from Purple Flea agent positions only. Updates every 60s.",
+    tip: "POST /v1/trade/open to trade. GET /v1/signals for market recommendations.",
+    updated_at: new Date().toISOString(),
+  });
 });
 
 // GET /markets/:coin/price

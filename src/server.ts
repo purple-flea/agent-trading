@@ -866,6 +866,13 @@ app.get("/openapi.json", (c) => c.json({
   },
 }));
 
+// ─── Root-level aliases (crawlable, public, no auth) ───
+app.get("/leaderboard", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/leaderboard", 302); });
+app.get("/feed", (c) => { c.header("Cache-Control", "public, max-age=30"); return c.redirect("/v1/feed", 302); });
+app.get("/stats", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/public-stats", 302); });
+app.get("/signals", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/signals", 302); });
+app.get("/oi", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/markets/oi", 302); });
+
 const port = parseInt(process.env.PORT || "3003", 10);
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Agent Trading v2 running on http://localhost:${info.port}`);
