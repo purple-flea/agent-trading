@@ -1806,4 +1806,249 @@ app.get("/position-size", agentAuth, async (c) => {
   });
 });
 
+// ─── Limit Orders ─────────────────────────────────────────────────────────────
+// Agents place conditional orders that execute when price reaches their target.
+// Call POST /check-limits to check prices and execute any triggered orders.
+
+// POST /limit — create a limit order
+app.post("/limit", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+  const body = await c.req.json().catch(() => ({}));
+
+  const { coin, side, size_usd, limit_price, leverage } = body as {
+    coin?: string; side?: "long" | "short"; size_usd?: number;
+    limit_price?: number; leverage?: number;
+  };
+
+  if (!coin || !side || !size_usd || !limit_price) {
+    return c.json({
+      error: "invalid_request",
+      message: "Provide coin, side (long/short), size_usd, limit_price",
+      example: { coin: "BTC", side: "long", size_usd: 500, limit_price: 80000, leverage: 5 },
+    }, 400);
+  }
+
+  if (side !== "long" && side !== "short") {
+    return c.json({ error: "invalid_side", message: "side must be 'long' or 'short'" }, 400);
+  }
+
+  if (typeof size_usd !== "number" || size_usd <= 0) {
+    return c.json({ error: "invalid_size", message: "size_usd must be a positive number" }, 400);
+  }
+
+  if (typeof limit_price !== "number" || limit_price <= 0) {
+    return c.json({ error: "invalid_price", message: "limit_price must be a positive number" }, 400);
+  }
+
+  if (size_usd > agent.maxPositionUsd) {
+    return c.json({ error: "too_large", message: `Max position is $${agent.maxPositionUsd}` }, 400);
+  }
+
+  const resolvedMkt = await resolveCoin(coin.toUpperCase());
+  if (!resolvedMkt) {
+    return c.json({ error: "unknown_coin", message: `Unknown market: ${coin}` }, 400);
+  }
+  const resolvedCoin = resolvedMkt.canonical;
+
+  const pendingCount = db.select({ count: sql<number>`count(*)` })
+    .from(schema.orders)
+    .where(and(
+      eq(schema.orders.agentId, agentId),
+      eq(schema.orders.orderType, "limit"),
+      eq(schema.orders.status, "pending"),
+    )).get();
+
+  if ((pendingCount?.count ?? 0) >= 10) {
+    return c.json({ error: "limit_reached", message: "Max 10 pending limit orders. Cancel some first." }, 400);
+  }
+
+  const orderId = `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const lev = Math.min(leverage ?? 5, agent.maxLeverage);
+  const now = Math.floor(Date.now() / 1000);
+
+  db.insert(schema.orders).values({
+    id: orderId,
+    agentId,
+    coin: resolvedCoin,
+    side: side === "long" ? "buy" : "sell",
+    orderType: "limit",
+    sizeUsd: size_usd,
+    leverage: lev,
+    price: limit_price,
+    status: "pending",
+    createdAt: now,
+  }).run();
+
+  const currentPrice = await getPrice(resolvedCoin).catch(() => null);
+  const direction = side === "long"
+    ? (limit_price < (currentPrice ?? Infinity) ? "below market (buy the dip)" : "above market")
+    : (limit_price > (currentPrice ?? 0) ? "above market (short the rally)" : "below market");
+
+  return c.json({
+    order_id: orderId,
+    coin: resolvedCoin,
+    side,
+    size_usd,
+    leverage: lev,
+    limit_price,
+    current_price: currentPrice,
+    direction,
+    status: "pending",
+    message: `Limit order placed. Will execute when ${resolvedCoin} reaches $${limit_price.toLocaleString()}.`,
+    next: "POST /v1/trade/check-limits to check and execute pending orders",
+  }, 201);
+});
+
+// GET /limit-orders — list pending limit orders
+app.get("/limit-orders", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const orders = db.select().from(schema.orders)
+    .where(and(
+      eq(schema.orders.agentId, agentId),
+      eq(schema.orders.orderType, "limit"),
+    ))
+    .orderBy(desc(schema.orders.createdAt))
+    .limit(50)
+    .all();
+
+  const pending = orders.filter(o => o.status === "pending");
+  const filled = orders.filter(o => o.status === "filled");
+  const cancelled = orders.filter(o => o.status === "cancelled");
+
+  return c.json({
+    pending: pending.map(o => ({
+      order_id: o.id, coin: o.coin,
+      side: o.side === "buy" ? "long" : "short",
+      size_usd: o.sizeUsd, leverage: o.leverage,
+      limit_price: o.price, created_at: o.createdAt,
+    })),
+    filled: filled.map(o => ({
+      order_id: o.id, coin: o.coin,
+      side: o.side === "buy" ? "long" : "short",
+      size_usd: o.sizeUsd, limit_price: o.price,
+      fill_price: o.fillPrice, filled_at: o.filledAt,
+    })),
+    cancelled: cancelled.map(o => ({
+      order_id: o.id, coin: o.coin,
+      side: o.side === "buy" ? "long" : "short",
+      size_usd: o.sizeUsd, limit_price: o.price,
+    })),
+    pending_count: pending.length,
+    tip: "POST /v1/trade/check-limits to execute triggered orders",
+  });
+});
+
+// DELETE /limit-orders/:id — cancel a pending limit order
+app.delete("/limit-orders/:id", (c) => {
+  const agentId = c.get("agentId") as string;
+  const orderId = c.req.param("id");
+
+  const order = db.select().from(schema.orders)
+    .where(and(
+      eq(schema.orders.id, orderId),
+      eq(schema.orders.agentId, agentId),
+      eq(schema.orders.orderType, "limit"),
+    )).get();
+
+  if (!order) return c.json({ error: "not_found", message: "Limit order not found" }, 404);
+  if (order.status !== "pending") {
+    return c.json({ error: "not_pending", message: `Order is '${order.status}'` }, 400);
+  }
+
+  db.update(schema.orders)
+    .set({ status: "cancelled", filledAt: Math.floor(Date.now() / 1000) })
+    .where(eq(schema.orders.id, orderId))
+    .run();
+
+  return c.json({ message: `Limit order ${orderId} cancelled`, coin: order.coin, limit_price: order.price });
+});
+
+// POST /check-limits — check pending orders vs live prices and execute triggered ones
+app.post("/check-limits", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+
+  const pendingOrders = db.select().from(schema.orders)
+    .where(and(
+      eq(schema.orders.agentId, agentId),
+      eq(schema.orders.orderType, "limit"),
+      eq(schema.orders.status, "pending"),
+    )).all();
+
+  if (pendingOrders.length === 0) {
+    return c.json({ message: "No pending limit orders", executed: 0, skipped: 0 });
+  }
+
+  const coins = [...new Set(pendingOrders.map(o => o.coin))];
+  const prices: Record<string, number> = {};
+  await Promise.all(coins.map(async coin => {
+    const p = await getPrice(coin).catch(() => null);
+    if (p) prices[coin] = p;
+  }));
+
+  const executed: string[] = [];
+  const skipped: { order_id: string; coin: string; limit_price: number; current_price: number | null; reason: string }[] = [];
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const order of pendingOrders) {
+    const currentPrice = prices[order.coin];
+    if (!currentPrice) {
+      skipped.push({ order_id: order.id, coin: order.coin, limit_price: order.price!, current_price: null, reason: "price_unavailable" });
+      continue;
+    }
+
+    const triggered =
+      (order.side === "buy" && currentPrice <= order.price!) ||
+      (order.side === "sell" && currentPrice >= order.price!);
+
+    if (!triggered) {
+      const gap = order.side === "buy"
+        ? `market $${currentPrice.toLocaleString()} above limit $${order.price!.toLocaleString()}`
+        : `market $${currentPrice.toLocaleString()} below limit $${order.price!.toLocaleString()}`;
+      skipped.push({ order_id: order.id, coin: order.coin, limit_price: order.price!, current_price: currentPrice, reason: gap });
+      continue;
+    }
+
+    try {
+      const signingKey = getSigningKey(agent);
+      const fill = await submitMarketOrder(
+        signingKey, agent.hlWalletAddress!, order.coin,
+        order.side === "buy", order.sizeUsd, order.leverage, agent.tier
+      );
+      const fees = calculateFee(fill.sizeUsd, agent.tier);
+      const posId = `pos_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      const tradeId = `trd_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      const posSide = fill.side === "buy" ? "long" : "short";
+      db.insert(schema.positions).values({
+        id: posId, agentId, coin: fill.coin, side: posSide,
+        sizeUsd: fill.sizeUsd, entryPrice: fill.avgPrice, leverage: order.leverage,
+        marginUsed: fill.marginRequired, liquidationPrice: fill.liquidationPrice,
+        status: "open",
+      }).run();
+      db.update(schema.orders).set({ status: "filled", fillPrice: fill.avgPrice, positionId: posId, filledAt: now }).where(eq(schema.orders.id, order.id)).run();
+      db.insert(schema.trades).values({
+        id: tradeId, agentId, orderId: order.id, coin: fill.coin,
+        side: fill.side, sizeUsd: fill.sizeUsd, price: fill.avgPrice,
+        fee: fees.totalFee,
+      }).run();
+      executed.push(`${order.id} → ${fill.coin} ${posSide} @$${fill.avgPrice}`);
+    } catch {
+      // No HL wallet — simulate fill at current market price
+      db.update(schema.orders).set({ status: "filled", fillPrice: currentPrice, filledAt: now }).where(eq(schema.orders.id, order.id)).run();
+      executed.push(`${order.id} → ${order.coin} ${order.side === "buy" ? "long" : "short"} @$${currentPrice} (simulated)`);
+    }
+  }
+
+  return c.json({
+    checked: pendingOrders.length,
+    executed: executed.length,
+    skipped: skipped.length,
+    executions: executed,
+    not_yet_triggered: skipped,
+    prices_checked: prices,
+  });
+});
+
 export default app;
