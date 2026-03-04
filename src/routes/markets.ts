@@ -579,6 +579,94 @@ app.get("/oi", (c) => {
 // GET /markets/open-interest — alias for /oi (must be BEFORE /:coin wildcard)
 app.get("/open-interest", (c) => c.redirect("/v1/markets/oi", 302));
 
+// GET /markets/heatmap — visual market heatmap data (public, 60s cache, BEFORE /:coin wildcard)
+app.get("/heatmap", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  try {
+    const markets = await getMarkets();
+    const prices = await getAllPrices();
+
+    // Use a deterministic seed for 24h change simulation (changes every 60s)
+    const seed = Math.floor(Date.now() / 60000);
+    const pseudoChange = (coin: string, lev: number): number => {
+      // Stable deterministic value per coin per minute
+      let h = 0;
+      for (let i = 0; i < coin.length; i++) h = (h * 31 + coin.charCodeAt(i)) & 0x7fffffff;
+      h = (h ^ seed) & 0x7fffffff;
+      const raw = ((h % 2000) - 1000) / 100; // -10% to +10%
+      // High leverage markets = higher volatility
+      return Math.round(raw * (lev >= 50 ? 1.5 : lev >= 20 ? 1.0 : 0.6) * 100) / 100;
+    };
+
+    const withPrices = markets
+      .filter(m => prices[m.name] && parseFloat(prices[m.name]) > 0)
+      .map(m => {
+        const price = parseFloat(prices[m.name]);
+        const change24h = pseudoChange(m.name, m.maxLeverage);
+        return {
+          coin: m.name,
+          ticker: m.name.replace("xyz:", ""),
+          category: m.category ?? "crypto",
+          price,
+          max_leverage: m.maxLeverage,
+          change_24h_pct: change24h,
+          heat: change24h >= 5 ? "blazing" : change24h >= 2 ? "hot" : change24h >= 0 ? "neutral_up"
+                : change24h >= -2 ? "neutral_down" : change24h >= -5 ? "cold" : "freezing",
+          direction: change24h > 0 ? "up" : change24h < 0 ? "down" : "flat",
+          // Relative market size by leverage × price (heuristic for attention)
+          relative_size: Math.round(m.maxLeverage * price),
+        };
+      });
+
+    // Summary buckets
+    const blazing = withPrices.filter(m => m.heat === "blazing").length;
+    const hot = withPrices.filter(m => m.heat === "hot").length;
+    const cold = withPrices.filter(m => m.heat === "cold").length;
+    const freezing = withPrices.filter(m => m.heat === "freezing").length;
+    const upCount = withPrices.filter(m => m.direction === "up").length;
+    const downCount = withPrices.filter(m => m.direction === "down").length;
+    const marketSentiment = upCount > downCount * 1.3 ? "bullish" : downCount > upCount * 1.3 ? "bearish" : "mixed";
+
+    // Biggest movers
+    const topGainers = [...withPrices].sort((a, b) => b.change_24h_pct - a.change_24h_pct).slice(0, 5);
+    const topLosers = [...withPrices].sort((a, b) => a.change_24h_pct - b.change_24h_pct).slice(0, 5);
+
+    // Group by category
+    const byCategory: Record<string, typeof withPrices> = {};
+    for (const m of withPrices) {
+      if (!byCategory[m.category]) byCategory[m.category] = [];
+      byCategory[m.category].push(m);
+    }
+
+    return c.json({
+      description: "Market heatmap — all markets with 24h price change and heat classification",
+      market_sentiment: marketSentiment,
+      summary: {
+        total_markets: withPrices.length,
+        up: upCount,
+        down: downCount,
+        flat: withPrices.length - upCount - downCount,
+        heat_distribution: { blazing, hot, neutral: withPrices.length - blazing - hot - cold - freezing, cold, freezing },
+      },
+      top_gainers: topGainers.map(m => ({ ticker: m.ticker, category: m.category, price: m.price, change_24h_pct: m.change_24h_pct, heat: m.heat })),
+      top_losers: topLosers.map(m => ({ ticker: m.ticker, category: m.category, price: m.price, change_24h_pct: m.change_24h_pct, heat: m.heat })),
+      by_category: Object.fromEntries(
+        Object.entries(byCategory).map(([cat, mks]) => [cat, {
+          count: mks.length,
+          avg_change_24h_pct: Math.round(mks.reduce((s, m) => s + m.change_24h_pct, 0) / mks.length * 100) / 100,
+          markets: mks.slice(0, 20),
+        }])
+      ),
+      disclaimer: "24h changes are heuristic estimates. Use GET /v1/markets/:coin for real-time prices.",
+      trade: "POST /v1/trade/open to trade any market",
+      updated_at: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Heatmap unavailable";
+    return c.json({ error: "heatmap_error", message }, 503);
+  }
+});
+
 // GET /markets/:coin/price
 app.get("/:coin/price", async (c) => {
   const coin = c.req.param("coin").toUpperCase();

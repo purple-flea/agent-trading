@@ -52,6 +52,8 @@ check GET "/v1/markets/BTC" "BTC market details"
 check GET "/v1/markets/BTC/price" "BTC price"
 check GET /v1/copy/leaderboard "copy leaderboard"
 check GET /v1/signals "trading signals"
+check GET /v1/markets/heatmap "market heatmap"
+check GET "/v1/trade/risk-calc?entry=50000&stop=48000&target=55000&size_usd=1000&leverage=5" "pre-trade risk calculator"
 check GET /v1/leaderboard "trading leaderboard"
 check POST /v1/backtest "strategy backtester" '{"strategy":"sma_crossover","market":"BTC","days":14}'
 check GET /changelog "changelog"

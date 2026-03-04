@@ -274,6 +274,105 @@ v1.use("/trade/open", rateLimit(30, 60_000));           // 30 opens/min per IP
 v1.use("/trade/close", rateLimit(30, 60_000));          // 30 closes/min per IP
 v1.use("/referral/withdraw", rateLimit(5, 60_000));     // 5 referral withdrawals/min per IP
 
+// ─── Public pre-trade risk calculator (no auth, MUST be before /trade route) ───
+// Calculates R:R ratio, position size, max loss, and break-even given entry/stop/target
+
+v1.get("/trade/risk-calc", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const entry = parseFloat(c.req.query("entry") ?? "0");
+  const stop = parseFloat(c.req.query("stop") ?? "0");
+  const target = parseFloat(c.req.query("target") ?? "0");
+  const sizeUsd = parseFloat(c.req.query("size_usd") ?? "1000");
+  const leverage = parseFloat(c.req.query("leverage") ?? "1");
+
+  if (!entry || !stop || !target || entry <= 0 || sizeUsd <= 0 || leverage < 1) {
+    return c.json({
+      error: "invalid_params",
+      message: "Provide entry, stop, target (prices), size_usd (position size in USD), leverage",
+      example: "GET /v1/trade/risk-calc?entry=50000&stop=48000&target=55000&size_usd=1000&leverage=5",
+      tip: "All prices in the same denomination (e.g., USD). size_usd is your notional position size.",
+    }, 400);
+  }
+
+  // Determine direction
+  const isLong = target > entry;
+  const isSane = isLong ? stop < entry : stop > entry;
+
+  if (!isSane) {
+    return c.json({
+      error: "invalid_levels",
+      message: isLong
+        ? "For a long: stop must be below entry, target above entry"
+        : "For a short: stop must be above entry, target below entry",
+    }, 400);
+  }
+
+  const direction = isLong ? "long" : "short";
+
+  // Risk metrics
+  const riskPct = Math.abs((entry - stop) / entry) * 100;
+  const rewardPct = Math.abs((target - entry) / entry) * 100;
+  const rrRatio = Math.round((rewardPct / riskPct) * 100) / 100;
+
+  // With leverage, position exposure = sizeUsd * leverage
+  const notionalExposure = sizeUsd * leverage;
+  const maxLossUsd = Math.round(notionalExposure * (riskPct / 100) * 100) / 100;
+  const maxGainUsd = Math.round(notionalExposure * (rewardPct / 100) * 100) / 100;
+  const breakEvenFees = 0.002; // 0.2% round-trip fee estimate
+  const breakEvenPrice = isLong
+    ? Math.round(entry * (1 + breakEvenFees / leverage) * 100) / 100
+    : Math.round(entry * (1 - breakEvenFees / leverage) * 100) / 100;
+
+  // Position size for fixed risk (risk 2% of account)
+  const accountSizeHint = sizeUsd;
+  const riskAmountHint = Math.round(accountSizeHint * 0.02 * 100) / 100;
+  const suggestedSizeForFixedRisk = Math.round((riskAmountHint / (riskPct / 100)) * 100) / 100;
+
+  // Quality rating
+  const quality = rrRatio >= 3 ? "excellent" : rrRatio >= 2 ? "good" : rrRatio >= 1.5 ? "acceptable" : rrRatio >= 1 ? "marginal" : "poor";
+  const qualityNote = rrRatio >= 2
+    ? "Solid R:R ratio. Recommended: only need >33% win rate to break even."
+    : rrRatio >= 1.5
+    ? "Acceptable setup. Need >40% win rate to break even."
+    : rrRatio >= 1
+    ? "Marginal setup. Consider tightening stop or extending target."
+    : "R:R below 1:1. Not recommended for systematic trading.";
+
+  return c.json({
+    direction,
+    levels: { entry, stop, target },
+    risk_reward: {
+      risk_pct: Math.round(riskPct * 100) / 100,
+      reward_pct: Math.round(rewardPct * 100) / 100,
+      rr_ratio: `1:${rrRatio}`,
+      rr_numeric: rrRatio,
+      quality,
+      note: qualityNote,
+      break_even_win_rate_pct: Math.round((1 / (1 + rrRatio)) * 10000) / 100,
+    },
+    position: {
+      size_usd: sizeUsd,
+      leverage,
+      notional_exposure_usd: Math.round(notionalExposure * 100) / 100,
+      max_loss_usd: maxLossUsd,
+      max_gain_usd: maxGainUsd,
+      break_even_price: breakEvenPrice,
+      margin_used_usd: sizeUsd,
+    },
+    sizing_hint: {
+      note: "To risk exactly 2% of your account size on this trade:",
+      account_size_assumed: accountSizeHint,
+      two_pct_risk_usd: riskAmountHint,
+      suggested_position_size_usd: suggestedSizeForFixedRisk,
+      at_leverage: leverage,
+    },
+    open_trade: `POST /v1/trade/open { "coin": "BTC", "side": "${direction}", "size_usd": ${sizeUsd}, "leverage": ${leverage} }`,
+    disclaimer: "Not financial advice. Calculator uses provided price levels only.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 v1.route("/auth", authRoutes);
 v1.route("/markets", marketsRoutes);
 v1.route("/trade", tradeRoutes);
