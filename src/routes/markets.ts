@@ -454,6 +454,74 @@ app.get("/movers", async (c) => {
   }
 });
 
+// GET /markets/screener — filter markets by criteria (public, 60s cache)
+// Query params: category, min_leverage, max_leverage, limit, include_rwa
+app.get("/screener", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  try {
+    const markets = await getMarkets();
+    const prices = await getAllPrices();
+
+    const priceMap: Record<string, number> = {};
+    for (const [k, v] of Object.entries(prices)) {
+      priceMap[k] = parseFloat(v as string);
+    }
+
+    const category = c.req.query("category")?.toLowerCase(); // crypto|stocks|commodities|forex|indices
+    const minLeverage = parseInt(c.req.query("min_leverage") || "0", 10);
+    const maxLeverage = parseInt(c.req.query("max_leverage") || "999", 10);
+    const limit = Math.min(parseInt(c.req.query("limit") || "20", 10), 100);
+    const sortBy = c.req.query("sort_by") || "leverage"; // leverage|price|name
+    const includeRwa = c.req.query("include_rwa") !== "false";
+
+    let filtered = markets
+      .filter((m: { name: string; maxLeverage: number; category?: string }) => {
+        const cat = m.category ?? "crypto";
+        if (!includeRwa && cat !== "crypto") return false;
+        if (category && cat !== category) return false;
+        if (m.maxLeverage < minLeverage) return false;
+        if (m.maxLeverage > maxLeverage) return false;
+        return priceMap[m.name] > 0;
+      });
+
+    if (sortBy === "price") {
+      filtered.sort((a: { name: string }, b: { name: string }) => (priceMap[b.name] || 0) - (priceMap[a.name] || 0));
+    } else if (sortBy === "name") {
+      filtered.sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
+    } else {
+      filtered.sort((a: { maxLeverage: number }, b: { maxLeverage: number }) => b.maxLeverage - a.maxLeverage);
+    }
+
+    const results = filtered.slice(0, limit).map((m: { name: string; maxLeverage: number; category?: string }, i: number) => ({
+      rank: i + 1,
+      coin: m.name.replace("xyz:", ""),
+      category: m.category ?? "crypto",
+      price: priceMap[m.name],
+      max_leverage: m.maxLeverage,
+      trade_long: `POST /v1/trade/open { "coin": "${m.name.replace("xyz:", "")}", "side": "long" }`,
+      trade_short: `POST /v1/trade/open { "coin": "${m.name.replace("xyz:", "")}", "side": "short" }`,
+    }));
+
+    return c.json({
+      screener: results,
+      total_matches: filtered.length,
+      showing: results.length,
+      filters_applied: {
+        category: category ?? "any",
+        min_leverage: minLeverage,
+        max_leverage: maxLeverage,
+        include_rwa: includeRwa,
+        sort_by: sortBy,
+      },
+      usage: "Add filters: ?category=crypto&min_leverage=20&sort_by=leverage&limit=10",
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: "screener_unavailable", message }, 503);
+  }
+});
+
 // GET /markets/:coin/price
 app.get("/:coin/price", async (c) => {
   const coin = c.req.param("coin").toUpperCase();

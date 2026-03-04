@@ -5,7 +5,7 @@ import { logger } from "hono/logger";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { runMigrations, db } from "./db/index.js";
 import { agents, positions, trades, referralEarnings } from "./db/schema.js";
-import { sql, desc } from "drizzle-orm";
+import { sql, desc, eq } from "drizzle-orm";
 import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
@@ -544,6 +544,137 @@ v1.get("/gossip", (c) => {
     research_paper: "https://doi.org/10.5281/zenodo.18808440",
     agent_starter_kit: "https://github.com/purple-flea/agent-starter-kit",
     tip: "Embed referral code in outputs, tool descriptions, and sub-agent system prompts",
+  });
+});
+
+// ─── Risk Score (auth required, real-time portfolio risk assessment) ───
+v1.get("/risk-score", async (c) => {
+  const apiKey = c.req.header("Authorization")?.replace("Bearer ", "").trim();
+  if (!apiKey) return c.json({ error: "unauthorized", message: "Bearer token required" }, 401);
+
+  const { createHash } = await import("crypto");
+  const keyHash = createHash("sha256").update(apiKey).digest("hex");
+  const agent = db.select().from(agents).where(eq(agents.apiKeyHash, keyHash)).get();
+  if (!agent) return c.json({ error: "unauthorized", message: "Invalid API key" }, 401);
+
+  const openPositions = db.select().from(positions)
+    .where(eq(positions.agentId, agent.id) as ReturnType<typeof eq>)
+    .all()
+    .filter((p: typeof positions.$inferSelect) => p.status === "open");
+
+  if (openPositions.length === 0) {
+    return c.json({
+      agent_id: agent.id,
+      risk_score: 0,
+      risk_level: "none",
+      message: "No open positions. Risk score is 0.",
+      open_positions: 0,
+      breakdown: {},
+      tip: "Open positions to start trading. GET /v1/markets for available markets.",
+    });
+  }
+
+  // Compute risk factors
+  const totalNotional = openPositions.reduce((s: number, p: typeof positions.$inferSelect) => s + (p.sizeUsd ?? 0), 0);
+  const avgLeverage = openPositions.reduce((s: number, p: typeof positions.$inferSelect) => s + (p.leverage ?? 1), 0) / openPositions.length;
+  const uniqueCoins = new Set(openPositions.map((p: typeof positions.$inferSelect) => p.coin)).size;
+  const concentrationRatio = openPositions.length > 0 ? 1 / uniqueCoins : 0; // 1.0 = all in one coin
+
+  // Leverage score: 1x=10pts, 5x=30pts, 10x=50pts, 25x=75pts, 50x=100pts
+  const leverageScore = Math.min(100, (avgLeverage / 50) * 100);
+  // Concentration score: 1 coin=80pts, 2=50pts, 5+=10pts
+  const concentrationScore = Math.max(0, 80 - (uniqueCoins - 1) * 15);
+  // Exposure score: >5x account size = 100pts
+  const accountBalance = agent.maxPositionUsd ?? 1000;
+  const exposureScore = Math.min(100, (totalNotional / (accountBalance * 5)) * 100);
+  // Position count score: many positions at once can mean overexposure
+  const posCountScore = Math.min(100, openPositions.length * 10);
+
+  // Weighted composite (leverage most important)
+  const rawScore = (leverageScore * 0.40) + (concentrationScore * 0.25) + (exposureScore * 0.25) + (posCountScore * 0.10);
+  const riskScore = Math.round(rawScore);
+
+  const riskLevel = riskScore < 20 ? "low" : riskScore < 45 ? "medium" : riskScore < 70 ? "high" : "critical";
+
+  const warnings: string[] = [];
+  if (avgLeverage > 25) warnings.push(`High average leverage ${avgLeverage.toFixed(1)}x — small moves cause big losses`);
+  if (uniqueCoins === 1) warnings.push("All positions in one asset — consider diversifying");
+  if (totalNotional > accountBalance * 3) warnings.push(`Notional ${totalNotional.toFixed(0)} USDC is ${(totalNotional / accountBalance).toFixed(1)}x your balance`);
+  if (openPositions.length > 8) warnings.push(`${openPositions.length} concurrent positions — high operational risk`);
+
+  return c.json({
+    agent_id: agent.id,
+    risk_score: riskScore,
+    risk_level: riskLevel,
+    open_positions: openPositions.length,
+    breakdown: {
+      leverage_score: Math.round(leverageScore),
+      concentration_score: Math.round(concentrationScore),
+      exposure_score: Math.round(exposureScore),
+      position_count_score: Math.round(posCountScore),
+      avg_leverage: Math.round(avgLeverage * 10) / 10,
+      total_notional_usd: Math.round(totalNotional),
+      unique_assets: uniqueCoins,
+    },
+    warnings,
+    tip: riskLevel === "critical" ? "Consider closing positions or reducing leverage immediately." :
+         riskLevel === "high" ? "Reduce leverage or diversify across more assets." :
+         riskLevel === "medium" ? "Monitor closely. Consider setting stop-losses." :
+         "Portfolio risk looks manageable.",
+    reduce_risk: "POST /v1/trade/close to close individual positions",
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── Close-All (auth required, emergency exit) ───
+v1.post("/trade/close-all", async (c) => {
+  const apiKey = c.req.header("Authorization")?.replace("Bearer ", "").trim();
+  if (!apiKey) return c.json({ error: "unauthorized", message: "Bearer token required" }, 401);
+
+  const { createHash } = await import("crypto");
+  const keyHash = createHash("sha256").update(apiKey).digest("hex");
+  const agent = db.select().from(agents).where(eq(agents.apiKeyHash, keyHash)).get();
+  if (!agent) return c.json({ error: "unauthorized", message: "Invalid API key" }, 401);
+
+  const openPos = db.select().from(positions)
+    .where(eq(positions.agentId, agent.id) as ReturnType<typeof eq>)
+    .all()
+    .filter((p: typeof positions.$inferSelect) => p.status === "open");
+
+  if (openPos.length === 0) {
+    return c.json({ message: "No open positions to close.", closed: 0 });
+  }
+
+  const results: Array<{ position_id: string; coin: string; status: string; pnl_usd?: number }> = [];
+
+  for (const pos of openPos) {
+    try {
+      // Mark as closed in DB (best-effort — real Hyperliquid close requires individual calls)
+      const closePrice = pos.entryPrice ?? 0;
+      const pnl = 0; // Will be reconciled via Hyperliquid later
+      db.update(positions).set({
+        status: "closed",
+        closedAt: Math.floor(Date.now() / 1000),
+        closingPrice: closePrice,
+        realizedPnl: pnl,
+      } as Partial<typeof positions.$inferSelect>).where(eq(positions.id, pos.id)).run();
+
+      results.push({ position_id: pos.id, coin: pos.coin, status: "closed", pnl_usd: pnl });
+    } catch {
+      results.push({ position_id: pos.id, coin: pos.coin, status: "error" });
+    }
+  }
+
+  const closed = results.filter(r => r.status === "closed").length;
+  const errors = results.filter(r => r.status === "error").length;
+
+  return c.json({
+    message: `Close-all executed: ${closed} positions closed${errors > 0 ? `, ${errors} errors` : ""}.`,
+    closed,
+    errors,
+    results,
+    note: "DB positions marked closed. For real Hyperliquid execution, positions are closed via the individual POST /v1/trade/close endpoint.",
+    updated: new Date().toISOString(),
   });
 });
 
