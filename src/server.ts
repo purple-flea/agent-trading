@@ -678,6 +678,187 @@ v1.post("/trade/close-all", async (c) => {
   });
 });
 
+// ─── Public Risk Profile (any agent, no auth, 60s cache) ───
+v1.get("/risk/:agentId", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const agentId = c.req.param("agentId");
+
+  const agent = db.select().from(agents).where(eq(agents.id, agentId)).get();
+  if (!agent) return c.json({ error: "not_found", message: `Agent ${agentId} not found` }, 404);
+
+  const openPositions = db.select().from(positions)
+    .where(eq(positions.agentId, agentId) as ReturnType<typeof eq>)
+    .all()
+    .filter((p: typeof positions.$inferSelect) => p.status === "open");
+
+  const closedPositions = db.select().from(positions)
+    .where(eq(positions.agentId, agentId) as ReturnType<typeof eq>)
+    .all()
+    .filter((p: typeof positions.$inferSelect) => p.status === "closed");
+
+  const totalNotional = openPositions.reduce((s: number, p: typeof positions.$inferSelect) => s + (p.sizeUsd ?? 0), 0);
+  const avgLeverage = openPositions.length > 0
+    ? openPositions.reduce((s: number, p: typeof positions.$inferSelect) => s + (p.leverage ?? 1), 0) / openPositions.length
+    : 0;
+  const uniqueAssets = new Set(openPositions.map((p: typeof positions.$inferSelect) => p.coin)).size;
+
+  const leverageScore = Math.min(100, (avgLeverage / 50) * 100);
+  const concentrationScore = openPositions.length > 0 ? Math.max(0, 80 - (uniqueAssets - 1) * 15) : 0;
+  const riskScore = openPositions.length === 0 ? 0 : Math.round((leverageScore * 0.5) + (concentrationScore * 0.5));
+  const riskLevel = riskScore < 20 ? "low" : riskScore < 45 ? "medium" : riskScore < 70 ? "high" : "critical";
+
+  const realizedPnl = closedPositions.reduce((s: number, p: typeof positions.$inferSelect) => s + (p.unrealizedPnl ?? 0), 0);
+  const allTrades = db.select().from(trades).where(eq(trades.agentId, agentId)).all();
+
+  return c.json({
+    agent_id: agentId,
+    risk_score: riskScore,
+    risk_level: riskLevel,
+    open_positions: openPositions.length,
+    closed_positions: closedPositions.length,
+    total_trades: allTrades.length,
+    realized_pnl_usd: Math.round(realizedPnl * 100) / 100,
+    exposure: {
+      total_notional_usd: Math.round(totalNotional),
+      avg_leverage: Math.round(avgLeverage * 10) / 10,
+      unique_assets: uniqueAssets,
+    },
+    breakdown: { leverage_score: Math.round(leverageScore), concentration_score: Math.round(concentrationScore) },
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── Strategy Backtester (public, 60s cache) ───
+v1.post("/backtest", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const body = await c.req.json().catch(() => ({}));
+  const {
+    strategy = "sma_crossover",
+    market = "BTC",
+    initial_capital = 1000,
+    leverage = 1,
+    days = 30,
+  } = body;
+
+  const validStrategies = ["sma_crossover", "rsi_oversold", "momentum", "mean_reversion"] as const;
+  if (!validStrategies.includes(strategy)) {
+    return c.json({ error: "invalid_strategy", valid_strategies: validStrategies }, 400);
+  }
+  if (initial_capital < 10 || initial_capital > 1_000_000) {
+    return c.json({ error: "invalid_capital", message: "initial_capital must be 10-1,000,000" }, 400);
+  }
+  const backtestDays = Math.min(Math.max(parseInt(String(days), 10) || 30, 7), 365);
+  const lev = Math.min(Math.max(parseFloat(String(leverage)) || 1, 1), 50);
+
+  // Simulate price series (geometric Brownian motion for demo purposes)
+  const seed = `${strategy}_${market}_${backtestDays}`;
+  let rng = seed.split("").reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0);
+  const rand = () => { rng = (Math.imul(48271, rng) + 1) & 0x7fffffff; return rng / 0x7fffffff; };
+
+  const basePrice = market === "BTC" ? 95000 : market === "ETH" ? 3200 : 100 + rand() * 900;
+  const dailyVol = 0.025; // 2.5% daily vol
+  const drift = 0.0003;   // slight upward drift
+
+  const prices: number[] = [basePrice];
+  for (let i = 1; i <= backtestDays; i++) {
+    const r = (rand() - 0.5) * 2; // -1 to 1 box-muller approximation
+    prices.push(prices[i - 1] * Math.exp(drift + dailyVol * r));
+  }
+
+  // Strategy logic
+  const trades_sim: Array<{ day: number; action: string; price: number; pnl: number }> = [];
+  let capital = initial_capital;
+  let position: { entry: number; size: number; side: "long" | "short" } | null = null;
+  const shortWindow = 5;
+  const longWindow = 20;
+
+  for (let i = longWindow; i <= backtestDays; i++) {
+    const price = prices[i];
+    const smaShort = prices.slice(i - shortWindow, i).reduce((a, b) => a + b, 0) / shortWindow;
+    const smaLong = prices.slice(i - longWindow, i).reduce((a, b) => a + b, 0) / longWindow;
+    const rsiWindow = prices.slice(i - 14, i);
+    const gains = rsiWindow.filter((p, j) => j > 0 && p > rsiWindow[j - 1]).reduce((a, b) => a + b, 0);
+    const losses = rsiWindow.filter((p, j) => j > 0 && p < rsiWindow[j - 1]).reduce((a, b) => a + Math.abs(b), 0);
+    const rsi = losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+
+    let signal: "long" | "short" | null = null;
+    if (strategy === "sma_crossover") {
+      signal = smaShort > smaLong ? "long" : smaShort < smaLong * 0.99 ? "short" : null;
+    } else if (strategy === "rsi_oversold") {
+      signal = rsi < 30 ? "long" : rsi > 70 ? "short" : null;
+    } else if (strategy === "momentum") {
+      const momentum = (price - prices[i - 10]) / prices[i - 10];
+      signal = momentum > 0.02 ? "long" : momentum < -0.02 ? "short" : null;
+    } else if (strategy === "mean_reversion") {
+      const mean = prices.slice(i - 20, i).reduce((a, b) => a + b, 0) / 20;
+      signal = price < mean * 0.97 ? "long" : price > mean * 1.03 ? "short" : null;
+    }
+
+    // Close position if signal flips
+    if (position && signal && signal !== position.side) {
+      const pnl = position.side === "long"
+        ? (price - position.entry) / position.entry * position.size * lev
+        : (position.entry - price) / position.entry * position.size * lev;
+      capital += pnl;
+      trades_sim.push({ day: i, action: `close_${position.side}`, price: Math.round(price), pnl: Math.round(pnl * 100) / 100 });
+      position = null;
+    }
+
+    // Open new position
+    if (!position && signal) {
+      const size = Math.min(capital * 0.1, capital); // 10% position sizing
+      position = { entry: price, size, side: signal };
+      trades_sim.push({ day: i, action: `open_${signal}`, price: Math.round(price), pnl: 0 });
+    }
+  }
+
+  // Close any open position at end
+  if (position) {
+    const finalPrice = prices[backtestDays];
+    const pnl = position.side === "long"
+      ? (finalPrice - position.entry) / position.entry * position.size * lev
+      : (position.entry - finalPrice) / position.entry * position.size * lev;
+    capital += pnl;
+    trades_sim.push({ day: backtestDays, action: `close_at_end`, price: Math.round(finalPrice), pnl: Math.round(pnl * 100) / 100 });
+  }
+
+  const wins = trades_sim.filter(t => t.pnl > 0).length;
+  const losses_count = trades_sim.filter(t => t.pnl < 0).length;
+  const totalPnl = capital - initial_capital;
+  const returnPct = (totalPnl / initial_capital) * 100;
+  const tradeCount = trades_sim.filter(t => t.action.startsWith("open")).length;
+
+  const equity: number[] = [initial_capital];
+  let runningCap = initial_capital;
+  for (const t of trades_sim.filter(t => t.pnl !== 0)) {
+    runningCap += t.pnl;
+    equity.push(Math.round(runningCap * 100) / 100);
+  }
+  const peakEquity = Math.max(...equity);
+  const troughEquity = Math.min(...equity.slice(equity.indexOf(peakEquity)));
+  const maxDrawdown = ((peakEquity - troughEquity) / peakEquity) * 100;
+
+  return c.json({
+    strategy,
+    market,
+    parameters: { initial_capital, leverage: lev, days: backtestDays },
+    results: {
+      final_capital: Math.round(capital * 100) / 100,
+      total_pnl_usd: Math.round(totalPnl * 100) / 100,
+      return_pct: Math.round(returnPct * 100) / 100,
+      total_trades: tradeCount,
+      win_rate_pct: tradeCount > 0 ? Math.round((wins / Math.max(wins + losses_count, 1)) * 10000) / 100 : 0,
+      max_drawdown_pct: Math.round(maxDrawdown * 100) / 100,
+      sharpe_approx: returnPct > 0 ? Math.round((returnPct / Math.max(maxDrawdown, 1)) * 100) / 100 : 0,
+    },
+    trades_sample: trades_sim.slice(0, 10),
+    note: "Simulated backtest using geometric Brownian motion price model. Not financial advice.",
+    try_live: "POST /v1/trade/open to execute real trades on Hyperliquid",
+    strategies_available: validStrategies,
+    updated: new Date().toISOString(),
+  });
+});
+
 v1.get("/docs", (c) => c.json({
   version: "3.0.0 — Real Hyperliquid Execution",
   auth: {
