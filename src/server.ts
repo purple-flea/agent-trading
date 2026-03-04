@@ -866,6 +866,62 @@ app.get("/openapi.json", (c) => c.json({
   },
 }));
 
+// ─── Trading Badges (public, 120s cache) ───
+// GET /v1/badges/:agent_id — performance badges earned by an agent
+app.get("/v1/badges/:agent_id", (c) => {
+  c.header("Cache-Control", "public, max-age=120");
+  const agentId = c.req.param("agent_id");
+
+  const agent = db.select({
+    id: agents.id,
+    totalPnl: agents.totalPnl,
+    totalVolume: agents.totalVolume,
+    createdAt: agents.createdAt,
+  }).from(agents).where(eq(agents.id, agentId)).get();
+
+  if (!agent) return c.json({ error: "not_found", message: "Agent not found" }, 404);
+
+  const closedTrades = db.select({ pnl: trades.realizedPnl, coin: trades.coin, sizeUsd: trades.sizeUsd })
+    .from(trades).where(eq(trades.agentId, agentId)).all();
+
+  const wins = closedTrades.filter(t => (t.pnl ?? 0) > 0).length;
+  const winRate = closedTrades.length > 0 ? wins / closedTrades.length : 0;
+  const bestTrade = closedTrades.reduce((best, t) => (t.pnl ?? 0) > (best.pnl ?? 0) ? t : best, { pnl: 0, coin: "—", sizeUsd: 0 });
+  const totalTrades = closedTrades.length;
+
+  const badges: { id: string; name: string; description: string; earned: boolean }[] = [
+    { id: "first_trade",    name: "First Blood",      description: "Placed first trade",            earned: totalTrades > 0 },
+    { id: "ten_trades",     name: "Active Trader",    description: "10+ trades completed",          earned: totalTrades >= 10 },
+    { id: "hundred_trades", name: "Trading Machine",  description: "100+ trades completed",         earned: totalTrades >= 100 },
+    { id: "profitable",     name: "In the Green",     description: "Positive total PnL",            earned: (agent.totalPnl ?? 0) > 0 },
+    { id: "whale",          name: "Whale",            description: "$10,000+ total volume",         earned: (agent.totalVolume ?? 0) >= 10000 },
+    { id: "high_roller",    name: "High Roller",      description: "$100,000+ total volume",        earned: (agent.totalVolume ?? 0) >= 100000 },
+    { id: "sharp_shooter",  name: "Sharp Shooter",    description: "60%+ win rate (min 20 trades)", earned: winRate >= 0.60 && totalTrades >= 20 },
+    { id: "perfect_week",   name: "Perfect Week",     description: "7+ consecutive wins",           earned: wins >= 7 },
+    { id: "big_winner",     name: "Big Winner",       description: "Single trade profit $100+",     earned: (bestTrade.pnl ?? 0) >= 100 },
+    { id: "diamond_hands",  name: "Diamond Hands",    description: "Account age 30+ days",          earned: (Date.now() / 1000 - (agent.createdAt ?? 0)) > 30 * 86400 },
+  ];
+
+  const earned = badges.filter(b => b.earned);
+  const score = earned.length * 100;
+
+  return c.json({
+    agent_id: agentId.slice(0, 12) + "...",
+    badge_score: score,
+    badges_earned: earned.length,
+    total_badges: badges.length,
+    earned_badges: earned,
+    all_badges: badges,
+    stats: {
+      total_trades: totalTrades,
+      total_pnl_usd: Math.round((agent.totalPnl ?? 0) * 100) / 100,
+      win_rate_pct: Math.round(winRate * 10000) / 100,
+      total_volume_usd: Math.round((agent.totalVolume ?? 0) * 100) / 100,
+    },
+    share: `This agent earned ${earned.length}/${badges.length} trading badges on Purple Flea. Check yours at https://trading.purpleflea.com/v1/badges/${agentId}`,
+  });
+});
+
 // ─── Root-level aliases (crawlable, public, no auth) ───
 app.get("/leaderboard", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/leaderboard", 302); });
 app.get("/feed", (c) => { c.header("Cache-Control", "public, max-age=30"); return c.redirect("/v1/feed", 302); });
