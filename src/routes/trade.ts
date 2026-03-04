@@ -2051,4 +2051,212 @@ app.post("/check-limits", async (c) => {
   });
 });
 
+// ─── Stop-Loss / Take-Profit Orders ─────────────────────────────────────────
+// Attach SL/TP orders to open positions. Triggered by POST /check-exits
+
+// POST /stop-loss — attach a stop-loss to an open position
+app.post("/stop-loss", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "invalid_json", message: "Request body must be valid JSON" }, 400);
+
+  const { position_id, trigger_price } = body;
+  if (!position_id) return c.json({ error: "missing_position_id", message: "position_id required" }, 400);
+  if (!trigger_price || trigger_price <= 0) return c.json({ error: "invalid_trigger_price", message: "trigger_price must be positive" }, 400);
+
+  const position = db.select().from(schema.positions)
+    .where(and(eq(schema.positions.id, position_id), eq(schema.positions.agentId, agentId)))
+    .get();
+  if (!position) return c.json({ error: "position_not_found", message: "Position not found or not yours" }, 404);
+  if (position.status !== "open") return c.json({ error: "position_not_open", message: "Position is not open" }, 400);
+
+  // For a long, stop triggers when price falls below trigger; for a short, when it rises above
+  const closeSide = position.side === "long" ? "sell" : "buy";
+
+  const orderId = `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  db.insert(schema.orders).values({
+    id: orderId,
+    agentId,
+    coin: position.coin,
+    side: closeSide,
+    orderType: "stop_loss",
+    sizeUsd: position.sizeUsd,
+    price: trigger_price,
+    leverage: position.leverage,
+    status: "pending",
+    positionId: position_id,
+  }).run();
+
+  return c.json({
+    order_id: orderId,
+    type: "stop_loss",
+    position_id,
+    coin: position.coin,
+    side: closeSide,
+    trigger_price,
+    size_usd: position.sizeUsd,
+    entry_price: position.entryPrice,
+    trigger_note: position.side === "long"
+      ? `Triggers when ${position.coin} price falls to $${trigger_price}`
+      : `Triggers when ${position.coin} price rises to $${trigger_price}`,
+    check_endpoint: "POST /v1/check-exits",
+  });
+});
+
+// POST /take-profit — attach a take-profit to an open position
+app.post("/take-profit", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "invalid_json", message: "Request body must be valid JSON" }, 400);
+
+  const { position_id, trigger_price } = body;
+  if (!position_id) return c.json({ error: "missing_position_id", message: "position_id required" }, 400);
+  if (!trigger_price || trigger_price <= 0) return c.json({ error: "invalid_trigger_price", message: "trigger_price must be positive" }, 400);
+
+  const position = db.select().from(schema.positions)
+    .where(and(eq(schema.positions.id, position_id), eq(schema.positions.agentId, agentId)))
+    .get();
+  if (!position) return c.json({ error: "position_not_found", message: "Position not found or not yours" }, 404);
+  if (position.status !== "open") return c.json({ error: "position_not_open", message: "Position is not open" }, 400);
+
+  // For a long, TP triggers when price rises above trigger; for a short, when it falls below
+  const closeSide = position.side === "long" ? "sell" : "buy";
+
+  const orderId = `ord_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  db.insert(schema.orders).values({
+    id: orderId,
+    agentId,
+    coin: position.coin,
+    side: closeSide,
+    orderType: "take_profit",
+    sizeUsd: position.sizeUsd,
+    price: trigger_price,
+    leverage: position.leverage,
+    status: "pending",
+    positionId: position_id,
+  }).run();
+
+  return c.json({
+    order_id: orderId,
+    type: "take_profit",
+    position_id,
+    coin: position.coin,
+    side: closeSide,
+    trigger_price,
+    size_usd: position.sizeUsd,
+    entry_price: position.entryPrice,
+    trigger_note: position.side === "long"
+      ? `Triggers when ${position.coin} price rises to $${trigger_price}`
+      : `Triggers when ${position.coin} price falls to $${trigger_price}`,
+    check_endpoint: "POST /v1/check-exits",
+  });
+});
+
+// POST /check-exits — check live prices and auto-close positions with triggered SL/TP
+app.post("/check-exits", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+  if (!agent) return c.json({ error: "agent_not_found" }, 404);
+
+  const now = Math.floor(Date.now() / 1000);
+
+  // Fetch all pending SL/TP orders for this agent
+  const exitOrders = db.select().from(schema.orders)
+    .where(and(
+      eq(schema.orders.agentId, agentId),
+      eq(schema.orders.status, "pending"),
+    ))
+    .all()
+    .filter(o => o.orderType === "stop_loss" || o.orderType === "take_profit");
+
+  if (exitOrders.length === 0) {
+    return c.json({ checked: 0, triggered: 0, message: "No pending SL/TP orders" });
+  }
+
+  // Fetch prices for all unique coins
+  const coins = [...new Set(exitOrders.map(o => o.coin))];
+  const prices: Record<string, number> = {};
+  for (const coin of coins) {
+    try {
+      prices[coin] = await getPrice(coin) ?? 0;
+    } catch {
+      prices[coin] = 0;
+    }
+  }
+
+  const triggered: string[] = [];
+  const skipped: Array<{ order_id: string; reason: string }> = [];
+
+  for (const order of exitOrders) {
+    const currentPrice = prices[order.coin];
+    if (!currentPrice) {
+      skipped.push({ order_id: order.id, reason: "price unavailable" });
+      continue;
+    }
+
+    // Check if the linked position is still open
+    const position = order.positionId
+      ? db.select().from(schema.positions).where(eq(schema.positions.id, order.positionId)).get()
+      : null;
+
+    if (!position || position.status !== "open") {
+      db.update(schema.orders).set({ status: "cancelled" }).where(eq(schema.orders.id, order.id)).run();
+      skipped.push({ order_id: order.id, reason: "position already closed" });
+      continue;
+    }
+
+    // Determine if triggered
+    let shouldTrigger = false;
+    if (order.orderType === "stop_loss") {
+      // Long SL: trigger when price <= stop; Short SL: trigger when price >= stop
+      shouldTrigger = position.side === "long"
+        ? currentPrice <= order.price!
+        : currentPrice >= order.price!;
+    } else {
+      // Long TP: trigger when price >= target; Short TP: trigger when price <= target
+      shouldTrigger = position.side === "long"
+        ? currentPrice >= order.price!
+        : currentPrice <= order.price!;
+    }
+
+    if (!shouldTrigger) {
+      const diff = ((currentPrice - order.price!) / order.price! * 100).toFixed(2);
+      skipped.push({ order_id: order.id, reason: `not triggered (current $${currentPrice}, target $${order.price}, ${diff}% away)` });
+      continue;
+    }
+
+    try {
+      const signingKey = getSigningKey(agent);
+      const fill = await submitMarketOrder(
+        signingKey, agent.hlWalletAddress!, order.coin,
+        order.side === "buy", order.sizeUsd, order.leverage, agent.tier
+      );
+      const pnl = position.side === "long"
+        ? (fill.avgPrice - position.entryPrice) / position.entryPrice * position.sizeUsd
+        : (position.entryPrice - fill.avgPrice) / position.entryPrice * position.sizeUsd;
+
+      db.update(schema.positions).set({ status: "closed", unrealizedPnl: round2(pnl), closedAt: now }).where(eq(schema.positions.id, order.positionId!)).run();
+      db.update(schema.orders).set({ status: "filled", fillPrice: fill.avgPrice, filledAt: now }).where(eq(schema.orders.id, order.id)).run();
+      triggered.push(`${order.orderType.replace("_", "-")} on ${order.coin} @$${fill.avgPrice} | PnL: ${pnl >= 0 ? "+" : ""}$${round2(pnl)}`);
+    } catch {
+      // Simulate close at current price
+      const pnl = position.side === "long"
+        ? (currentPrice - position.entryPrice) / position.entryPrice * position.sizeUsd
+        : (position.entryPrice - currentPrice) / position.entryPrice * position.sizeUsd;
+      db.update(schema.positions).set({ status: "closed", unrealizedPnl: round2(pnl), closedAt: now }).where(eq(schema.positions.id, order.positionId!)).run();
+      db.update(schema.orders).set({ status: "filled", fillPrice: currentPrice, filledAt: now }).where(eq(schema.orders.id, order.id)).run();
+      triggered.push(`${order.orderType.replace("_", "-")} on ${order.coin} @$${currentPrice} (simulated) | PnL: ${pnl >= 0 ? "+" : ""}$${round2(pnl)}`);
+    }
+  }
+
+  return c.json({
+    checked: exitOrders.length,
+    triggered: triggered.length,
+    skipped: skipped.length,
+    executions: triggered,
+    not_yet_triggered: skipped,
+    prices_checked: prices,
+  });
+});
+
 export default app;
