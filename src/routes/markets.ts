@@ -576,6 +576,9 @@ app.get("/oi", (c) => {
   });
 });
 
+// GET /markets/open-interest — alias for /oi (must be BEFORE /:coin wildcard)
+app.get("/open-interest", (c) => c.redirect("/v1/markets/oi", 302));
+
 // GET /markets/:coin/price
 app.get("/:coin/price", async (c) => {
   const coin = c.req.param("coin").toUpperCase();
