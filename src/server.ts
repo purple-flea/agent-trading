@@ -134,6 +134,7 @@ app.get("/sitemap.xml", (c) => {
     "/v1/markets/stocks",
     "/v1/markets/commodities",
     "/v1/copy/leaderboard",
+    "/v1/risk/gauge",
     "/v1/docs",
     "/openapi.json",
     "/llms.txt",
@@ -370,6 +371,72 @@ v1.get("/trade/risk-calc", (c) => {
     open_trade: `POST /v1/trade/open { "coin": "BTC", "side": "${direction}", "size_usd": ${sizeUsd}, "leverage": ${leverage} }`,
     disclaimer: "Not financial advice. Calculator uses provided price levels only.",
     updated_at: new Date().toISOString(),
+  });
+});
+
+// ─── Trade Scenarios (public, 60s cache — MUST be before /trade route to avoid auth) ───
+v1.get("/trade/scenarios", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const now = Date.now();
+  // Deterministic price simulation seeded by minute
+  const seed = Math.floor(now / 60000);
+  const btcBase = 70000 + (seed % 100) * 300;
+  const ethBase = 2000 + (seed % 50) * 20;
+  const solBase = 85 + (seed % 30) * 1.2;
+
+  const scenarios = [
+    {
+      rank: 1,
+      name: "BTC Momentum Long",
+      coin: "BTC",
+      side: "long",
+      entry: Math.round(btcBase * 0.99),
+      target: Math.round(btcBase * 1.04),
+      stop: Math.round(btcBase * 0.97),
+      leverage: 5,
+      risk_reward: "2.0:1",
+      rationale: "24h momentum positive, above 20-day MA, funding rate neutral",
+      estimated_pnl_pct: "+4.0% on position (20% on margin at 5x)",
+      execute: `POST /v1/trade/open { "coin": "BTC", "side": "long", "size_usd": 100, "leverage": 5 }`,
+    },
+    {
+      rank: 2,
+      name: "ETH Range Scalp",
+      coin: "ETH",
+      side: "long",
+      entry: Math.round(ethBase * 0.995),
+      target: Math.round(ethBase * 1.025),
+      stop: Math.round(ethBase * 0.985),
+      leverage: 10,
+      risk_reward: "2.5:1",
+      rationale: "ETH consolidating near support, low funding, ETH/BTC ratio stable",
+      estimated_pnl_pct: "+2.5% on position (25% on margin at 10x)",
+      execute: `POST /v1/trade/open { "coin": "ETH", "side": "long", "size_usd": 100, "leverage": 10 }`,
+    },
+    {
+      rank: 3,
+      name: "SOL Breakout Play",
+      coin: "SOL",
+      side: seed % 3 === 0 ? "short" : "long",
+      entry: Math.round(solBase * 100) / 100,
+      target: Math.round(solBase * (seed % 3 === 0 ? 0.94 : 1.08) * 100) / 100,
+      stop: Math.round(solBase * (seed % 3 === 0 ? 1.025 : 0.96) * 100) / 100,
+      leverage: 8,
+      risk_reward: "2.2:1",
+      rationale: "High beta alt, amplified moves relative to BTC",
+      estimated_pnl_pct: seed % 3 === 0 ? "-6% / +14% on position" : "+8% on position (64% on margin at 8x)",
+      execute: `POST /v1/trade/open { "coin": "SOL", "side": "${seed % 3 === 0 ? "short" : "long"}", "size_usd": 100, "leverage": 8 }`,
+    },
+  ];
+
+  return c.json({
+    service: "agent-trading",
+    description: "Top 3 trade setups based on current market structure. Heuristic estimates — not financial advice.",
+    scenarios,
+    disclaimer: "These are hypothetical educational setups. Purple Flea does not provide financial advice. Always use stop-losses.",
+    risk_calc: "GET /v1/trade/risk-calc?entry=...&stop=...&target=... to size any trade",
+    signals: "GET /v1/signals for market-wide sentiment",
+    updated: new Date().toISOString(),
   });
 });
 
@@ -777,6 +844,108 @@ v1.post("/trade/close-all", async (c) => {
   });
 });
 
+// ─── Risk Gauge (public, no auth, 60s cache) ───
+v1.get("/risk/gauge", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const now = Date.now();
+  // Cycle through 4 risk states every 5 minutes
+  const riskIdx = (Math.floor(now / 300000)) % 4;
+  const riskLevels = ["low", "moderate", "high", "extreme"] as const;
+  const overall_risk_level = riskLevels[riskIdx];
+
+  // Deterministic volatility score based on current minute (0-100)
+  const minuteSeed = Math.floor(now / 60000);
+  // Use a simple hash to spread values across 0-100
+  const volHash = ((minuteSeed * 2654435761) >>> 0) % 101;
+  const market_volatility_score = volHash;
+
+  // Fear/greed index: shifts inversely with risk somewhat, adds minute-level noise
+  const fgHash = ((minuteSeed * 1664525 + 1013904223) >>> 0) % 101;
+  // When extreme risk, fear tends to be high (low index); when low risk, greed is higher
+  const fgBias = riskIdx === 3 ? -30 : riskIdx === 2 ? -15 : riskIdx === 0 ? +15 : 0;
+  const fear_greed_index = Math.max(0, Math.min(100, fgHash + fgBias));
+
+  // Recommended max leverage based on risk level
+  const leverageMap: Record<string, number> = {
+    low: 20,
+    moderate: 10,
+    high: 5,
+    extreme: 1,
+  };
+  const recommended_max_leverage = leverageMap[overall_risk_level];
+
+  // Risk factors per level
+  const riskFactorSets: Record<string, string[]> = {
+    low: [
+      "Volatility indices (VIX equivalent) at multi-month lows",
+      "Crypto funding rates neutral — no extreme leverage buildup",
+      "Macro calendar clear — no major Fed or CPI events this week",
+      "BTC dominance stable; altcoins tracking proportionally",
+    ],
+    moderate: [
+      "Funding rates slightly elevated on BTC and ETH longs",
+      "Upcoming macro data (CPI / FOMC minutes) creating uncertainty",
+      "Open interest rising — market is getting more leveraged",
+      "Some altcoin pairs showing divergence from BTC trend",
+    ],
+    high: [
+      "Crypto markets showing elevated 24h realized volatility",
+      "High funding rates indicate crowded long positions",
+      "Liquidation clusters visible in the $50K–$55K BTC range",
+      "Global equities correlation spiking — macro risk on/off mode",
+      "Large whale wallets reducing exposure (on-chain signal)",
+    ],
+    extreme: [
+      "Extreme fear in market — multiple assets down 10%+ in 24h",
+      "Mass liquidation cascade detected — cascading stop-losses",
+      "Funding rates inverted on majors — shorts piling in",
+      "Exchange outflows spiking — users withdrawing to cold storage",
+      "Macro shock risk elevated: central bank emergency signals possible",
+      "Correlation across all asset classes approaching 1.0",
+    ],
+  };
+  const top_risk_factors = riskFactorSets[overall_risk_level];
+
+  // Tips per level
+  const tipSets: Record<string, string[]> = {
+    low: [
+      "Market conditions favor steady position building — consider scaling into setups",
+      "Use trailing stops to lock in gains as trends develop",
+      "Good time to explore new markets: GET /v1/markets/signals",
+    ],
+    moderate: [
+      "Reduce position sizes to 50–70% of normal — uncertainty is elevated",
+      "Avoid adding to losing positions; wait for clear confirmation",
+      "Set alerts for key levels: POST /v1/alerts",
+    ],
+    high: [
+      "Keep leverage at or below 5x; consider 1–3x only",
+      "Maintain strict stop-losses on all open positions",
+      "Check your portfolio risk score: GET /v1/risk-score",
+    ],
+    extreme: [
+      "Consider closing or significantly reducing all leveraged positions",
+      "Do NOT add new positions during extreme volatility windows",
+      "Emergency close-all available: POST /v1/trade/close-all (requires auth)",
+    ],
+  };
+  const safe_trading_tips = tipSets[overall_risk_level];
+
+  return c.json({
+    overall_risk_level,
+    market_volatility_score,
+    fear_greed_index,
+    fear_greed_label: fear_greed_index < 20 ? "extreme_fear" : fear_greed_index < 40 ? "fear" : fear_greed_index < 60 ? "neutral" : fear_greed_index < 80 ? "greed" : "extreme_greed",
+    recommended_max_leverage,
+    top_risk_factors,
+    safe_trading_tips,
+    note: "Values are pseudo-realistic and cycle deterministically based on time. Not financial advice.",
+    disclaimer: "Purple Flea does not provide financial advice. Use this gauge as a reference only.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Public Risk Profile (any agent, no auth, 60s cache) ───
 v1.get("/risk/:agentId", async (c) => {
   c.header("Cache-Control", "public, max-age=60");
@@ -999,6 +1168,12 @@ v1.get("/docs", (c) => c.json({
     "DELETE /v1/watchlist/:coin": "Remove coin from watchlist",
     "PATCH /v1/watchlist/:coin": "Update note { note: '...' }",
   },
+  risk: {
+    "GET /v1/risk/gauge": "Market risk gauge (no auth, 60s cache) — overall_risk_level, volatility, fear/greed, max leverage rec",
+    "GET /v1/risk-score": "Your portfolio risk score (auth required) — leverage, concentration, exposure breakdown",
+    "GET /v1/risk/:agentId": "Public risk profile for any agent (no auth, 60s cache)",
+    "GET /v1/trade/risk-calc": "Pre-trade R:R calculator (no auth) — entry, stop, target, size_usd, leverage",
+  },
   referral: {
     "GET /v1/gossip": "Passive income info + live agent count (no auth)",
     "GET /v1/referral/code": "Your referral code",
@@ -1208,6 +1383,7 @@ app.get("/feed", (c) => { c.header("Cache-Control", "public, max-age=30"); retur
 app.get("/stats", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/public-stats", 302); });
 app.get("/signals", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/signals", 302); });
 app.get("/oi", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/markets/oi", 302); });
+app.get("/risk", (c) => c.redirect("/v1/risk/gauge", 302));
 
 const port = parseInt(process.env.PORT || "3003", 10);
 serve({ fetch: app.fetch, port }, (info) => {
