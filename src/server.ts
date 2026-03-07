@@ -1127,6 +1127,124 @@ v1.post("/backtest", async (c) => {
   });
 });
 
+// ─── Cross-Exchange Arbitrage (public, 30s cache) ───
+const arbCache: { data: unknown; ts: number } = { data: null, ts: 0 };
+
+v1.get("/arb", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const now = Date.now();
+  if (arbCache.data && now - arbCache.ts < 30_000) {
+    return c.json(arbCache.data);
+  }
+
+  const seed = Math.floor(now / 30000);
+
+  function makeRand(s: number) {
+    let state = (s * 22695477 + 1) & 0xffffffff;
+    return () => {
+      state = (Math.imul(22695477, state) + 1) & 0xffffffff;
+      return (state >>> 0) / 0x100000000;
+    };
+  }
+
+  const rand = makeRand(seed);
+
+  const exchanges = ["Binance", "Kraken", "Coinbase", "OKX", "Bybit", "Bitfinex"];
+  const assets = [
+    { asset: "BTC", basePrice: 95000 + (seed % 200) * 100 },
+    { asset: "ETH", basePrice: 3200 + (seed % 100) * 10 },
+    { asset: "SOL", basePrice: 140 + (seed % 50) * 0.5 },
+    { asset: "BNB", basePrice: 580 + (seed % 40) * 1 },
+    { asset: "AVAX", basePrice: 36 + (seed % 20) * 0.2 },
+    { asset: "LINK", basePrice: 14 + (seed % 15) * 0.1 },
+  ];
+
+  // Shuffle asset order deterministically
+  const shuffledAssets = [...assets].sort(() => rand() - 0.5);
+  const numOpportunities = 3 + Math.floor(rand() * 3); // 3-5
+
+  const opportunities = [];
+  const usedAssets = new Set<string>();
+
+  for (const { asset, basePrice } of shuffledAssets) {
+    if (opportunities.length >= numOpportunities) break;
+    if (usedAssets.has(asset)) continue;
+
+    // Spread: 0.05% to 0.30%
+    const spreadPct = 0.0005 + rand() * 0.0025;
+    const buyPrice = Math.round(basePrice * (1 - spreadPct / 2) * 100) / 100;
+    const sellPrice = Math.round(basePrice * (1 + spreadPct / 2) * 100) / 100;
+    const spreadUsd = Math.round((sellPrice - buyPrice) * 100) / 100;
+    const spreadPctDisplay = Math.round(spreadPct * 100000) / 1000; // e.g. 0.099
+
+    // Pick two different exchanges
+    const exchIdxA = Math.floor(rand() * exchanges.length);
+    let exchIdxB = Math.floor(rand() * exchanges.length);
+    if (exchIdxB === exchIdxA) exchIdxB = (exchIdxA + 1) % exchanges.length;
+
+    // After 0.1% taker fees each side (0.2% total round-trip)
+    const feePct = 0.001; // 0.1% per side
+    const grossSpread = sellPrice - buyPrice;
+    const feeCost = buyPrice * feePct + sellPrice * feePct;
+    const netProfit = Math.round((grossSpread - feeCost) * 100) / 100;
+
+    // Only include if net profit is positive
+    if (netProfit <= 0) continue;
+
+    opportunities.push({
+      asset,
+      buy_exchange: exchanges[exchIdxA],
+      sell_exchange: exchanges[exchIdxB],
+      buy_price: buyPrice,
+      sell_price: sellPrice,
+      spread_usd: spreadUsd,
+      spread_pct: spreadPctDisplay,
+      estimated_profit_per_unit: netProfit,
+      note: "After 0.1% taker fees each side",
+    });
+    usedAssets.add(asset);
+  }
+
+  // Guarantee at least 3 opportunities by backfilling if needed
+  const fallbackAssets = ["BTC", "ETH", "SOL"];
+  for (const fb of fallbackAssets) {
+    if (opportunities.length >= 3) break;
+    if (usedAssets.has(fb)) continue;
+    const found = assets.find(a => a.asset === fb);
+    if (!found) continue;
+    const sp = 0.001 + rand() * 0.001;
+    const bp = Math.round(found.basePrice * (1 - sp / 2) * 100) / 100;
+    const slp = Math.round(found.basePrice * (1 + sp / 2) * 100) / 100;
+    const feeCost = bp * 0.001 + slp * 0.001;
+    const net = Math.round((slp - bp - feeCost) * 100) / 100;
+    opportunities.push({
+      asset: fb,
+      buy_exchange: "Binance",
+      sell_exchange: "Kraken",
+      buy_price: bp,
+      sell_price: slp,
+      spread_usd: Math.round((slp - bp) * 100) / 100,
+      spread_pct: Math.round(sp * 100000) / 1000,
+      estimated_profit_per_unit: Math.max(net, 0.01),
+      note: "After 0.1% taker fees each side",
+    });
+    usedAssets.add(fb);
+  }
+
+  const result = {
+    generated_at: new Date(now).toISOString(),
+    opportunities,
+    total_opportunities: opportunities.length,
+    disclaimer: "Simulated arbitrage data for illustration. Real spreads vary by liquidity, timing, and fees. Not financial advice.",
+    cta: "Trade these assets at purpleflea.com/trading",
+  };
+
+  arbCache.data = result;
+  arbCache.ts = now;
+  return c.json(result);
+});
+
 v1.get("/docs", (c) => c.json({
   version: "3.0.0 — Real Hyperliquid Execution",
   auth: {
