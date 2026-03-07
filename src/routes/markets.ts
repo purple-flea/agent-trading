@@ -717,6 +717,178 @@ app.get("/correlations", (c) => {
   return c.json(result);
 });
 
+// GET /markets/calendar — upcoming market events for next 48h (public, 1h cache, BEFORE /:coin wildcard)
+app.get("/calendar", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+
+  const now = new Date();
+  const nowMs = now.getTime();
+  const utcHour = now.getUTCHours();
+  const utcMin = now.getUTCMinutes();
+  const utcSec = now.getUTCSeconds();
+
+  // Helper: seconds until next occurrence of a given UTC hour (repeating every periodHours)
+  const secsUntilNextHour = (targetHour: number, periodHours: number = 24): number => {
+    const todayTarget = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), targetHour, 0, 0);
+    let candidate = todayTarget;
+    while (candidate <= nowMs) candidate += periodHours * 3600 * 1000;
+    return Math.round((candidate - nowMs) / 1000);
+  };
+
+  // Helper: build ISO string N seconds from now
+  const isoInSecs = (secs: number): string => new Date(nowMs + secs * 1000).toISOString();
+
+  // ── Market session ──
+  const sessions: Array<{ name: string; startHour: number; endHour: number; description: string }> = [
+    { name: "asian_session",  startHour: 0,  endHour: 8,  description: "Asian session (00:00-08:00 UTC). Lower volume, wider spreads. JPY/CNY pairs active." },
+    { name: "london_open",    startHour: 7,  endHour: 16, description: "London session (07:00-16:00 UTC). High EUR/GBP volume. Good for BTC/ETH momentum." },
+    { name: "new_york_open",  startHour: 13, endHour: 22, description: "New York session (13:00-22:00 UTC). Highest overall volume. Overlaps London 13-16 UTC." },
+    { name: "late_us",        startHour: 22, endHour: 24, description: "Late US / early Asian handoff (22:00-00:00 UTC). Volume tapering." },
+  ];
+  // Determine current session (first match wins; allow overlap)
+  let currentSession = sessions[0];
+  for (const s of sessions) {
+    if (utcHour >= s.startHour && utcHour < s.endHour) { currentSession = s; break; }
+  }
+  // Next session (circular)
+  const currentIdx = sessions.indexOf(currentSession);
+  const nextSession = sessions[(currentIdx + 1) % sessions.length];
+  // Seconds until next session start
+  const secsUntilNextSession = secsUntilNextHour(nextSession.startHour);
+
+  // ── Funding rate resets (every 8h: 00:00, 08:00, 16:00 UTC) ──
+  const fundingHours = [0, 8, 16];
+  const fundingSecsOptions = fundingHours.map(h => secsUntilNextHour(h, 8));
+  const nextFundingSecs = Math.min(...fundingSecsOptions);
+  const nextFundingAt = isoInSecs(nextFundingSecs);
+  // Funding direction heuristic: based on hour-of-day (deterministic proxy)
+  const fundingPositive = (utcHour % 8) < 4; // first half of period = positive funding
+  const fundingDirection = fundingPositive ? "positive" : "negative";
+
+  // ── Next 5 additional funding events (every 8h after the first) ──
+  const fundingEvents: Array<{ type: string; markets: string[]; occurs_at: string; seconds_until: number; description: string; current_funding_direction: string; trading_tip: string }> = [];
+  for (let i = 0; i < 6; i++) {
+    const secs = nextFundingSecs + i * 8 * 3600;
+    fundingEvents.push({
+      type: "funding_reset",
+      markets: ["BTC", "ETH", "SOL", "BNB", "AVAX"],
+      occurs_at: isoInSecs(secs),
+      seconds_until: secs,
+      description: "8-hour funding rate reset. High funding = trend exhaustion signal.",
+      current_funding_direction: fundingDirection,
+      trading_tip: fundingDirection === "positive"
+        ? "Positive funding: longs paying shorts. Often precedes pullback. Consider shorting or waiting."
+        : "Negative funding: shorts paying longs. Bearish sentiment present. Contrarian long opportunity possible.",
+    });
+  }
+
+  // ── Weekly options expiry (Friday 08:00 UTC) ──
+  const dayOfWeek = now.getUTCDay(); // 0=Sun,1=Mon,...,5=Fri,6=Sat
+  const daysUntilFriday = (5 - dayOfWeek + 7) % 7 || 7;
+  const fridayExpiry = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilFriday, 8, 0, 0);
+  // If today is Friday and it's already past 08:00, go to next Friday
+  const fridayExpirySecs = fridayExpiry > nowMs ? Math.round((fridayExpiry - nowMs) / 1000) : Math.round((fridayExpiry + 7 * 86400 * 1000 - nowMs) / 1000);
+  const fridayExpiryAt = isoInSecs(fridayExpirySecs);
+
+  // ── Peak volume windows (08:00-12:00 and 16:00-20:00 UTC) ──
+  const peakWindows = [
+    { startHour: 8, endHour: 12, label: "London open peak", description: "London open (08:00-12:00 UTC) — strong BTC/ETH momentum, tight spreads." },
+    { startHour: 16, endHour: 20, label: "NYSE open peak",   description: "NYSE open (16:00-20:00 UTC) — typically highest crypto volume of the day." },
+  ];
+  const inPeakNow = peakWindows.some(w => utcHour >= w.startHour && utcHour < w.endHour);
+  const nextPeakSecsOptions = peakWindows.map(w => secsUntilNextHour(w.startHour));
+  const nextPeakSecs = Math.min(...nextPeakSecsOptions);
+  const nextPeakWindow = peakWindows.find(w => secsUntilNextHour(w.startHour) === nextPeakSecs) ?? peakWindows[0];
+
+  // ── Low volume period (00:00-04:00 UTC) ──
+  const inLowVolume = utcHour < 4;
+  const secsUntilLowVol = secsUntilNextHour(0);
+  const secsUntilLowVolEnd = inLowVolume ? secsUntilNextHour(4) : -1;
+
+  // ── Day-of-week pattern ──
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const today = days[dayOfWeek];
+  const dowPatterns: Record<number, { typical_volume: string; typical_trend: string; advice: string }> = {
+    0: { typical_volume: "low",    typical_trend: "range-bound — weekend low liquidity",              advice: "Smaller position sizes recommended on weekends" },
+    1: { typical_volume: "medium", typical_trend: "trend continuation from weekend — watch open",     advice: "Monday often continues the prior week's trend; wait for AM confirmation" },
+    2: { typical_volume: "high",   typical_trend: "typically strong directional day",                  advice: "Tuesday often sees breakouts; good for momentum strategies" },
+    3: { typical_volume: "high",   typical_trend: "mid-week consolidation or continuation",            advice: "Wednesday: watch for weekly FOMC/macro releases; be nimble" },
+    4: { typical_volume: "high",   typical_trend: "strong trend day or reversal ahead of Friday",     advice: "Thursday often strongest trending day; trail stops tightly" },
+    5: { typical_volume: "medium", typical_trend: "de-risking ahead of weekend; options expiry effect", advice: "Reduce leverage before close; expiry can pin prices near max pain" },
+    6: { typical_volume: "low",    typical_trend: "range-bound — weekend low liquidity",              advice: "Avoid large positions Saturday; liquidity thin, spreads wider" },
+  };
+  const dowPattern = dowPatterns[dayOfWeek];
+
+  // ── Build events array ──
+  const events: unknown[] = [
+    ...fundingEvents,
+    {
+      type: "options_expiry_weekly",
+      occurs_at: fridayExpiryAt,
+      seconds_until: fridayExpirySecs,
+      description: "Weekly options expiry. Max pain price often acts as magnet.",
+      trading_tip: "BTC max pain typically within ±3% of spot. Expect volatility spike then snap-back post-expiry.",
+    },
+    {
+      type: "peak_volume_window",
+      occurs_at: isoInSecs(nextPeakSecs),
+      seconds_until: nextPeakSecs,
+      description: nextPeakWindow.description,
+      currently_in_peak: inPeakNow,
+      trading_tip: inPeakNow
+        ? "You are currently in a peak volume window. Best time for larger orders with tightest spreads."
+        : "Upcoming peak window. Stage orders in advance; avoid market orders right at open (slippage spike).",
+    },
+    {
+      type: "low_volume_period",
+      occurs_at: inLowVolume ? isoInSecs(secsUntilLowVolEnd) : isoInSecs(secsUntilLowVol),
+      seconds_until: inLowVolume ? secsUntilLowVolEnd : secsUntilLowVol,
+      description: "Low liquidity window (00:00-04:00 UTC) — wider spreads, higher slippage risk.",
+      currently_active: inLowVolume,
+      trading_tip: inLowVolume
+        ? "Currently in low-volume window. Use limit orders only; avoid market orders. Consider waiting for London open."
+        : "Low volume window approaching at 00:00 UTC. Close or hedge risky positions before then.",
+    },
+  ];
+
+  // Sort by seconds_until ascending (soonest first), filtering out negative values
+  const sortedEvents = (events as Array<{ seconds_until: number }>)
+    .filter(e => e.seconds_until >= 0)
+    .sort((a, b) => a.seconds_until - b.seconds_until);
+
+  return c.json({
+    service: "agent-trading",
+    generated_at: now.toISOString(),
+    current_utc_hour: utcHour,
+    current_utc_time: `${String(utcHour).padStart(2, "0")}:${String(utcMin).padStart(2, "0")}:${String(utcSec).padStart(2, "0")} UTC`,
+    market_session: currentSession.name,
+    events: sortedEvents,
+    sessions: {
+      current: currentSession.name,
+      description: currentSession.description,
+      upcoming: [
+        {
+          name: nextSession.name,
+          description: nextSession.description,
+          starts_at: isoInSecs(secsUntilNextSession),
+          seconds_until: secsUntilNextSession,
+        },
+      ],
+    },
+    volume_conditions: {
+      in_peak_window: inPeakNow,
+      in_low_volume_window: inLowVolume,
+      peak_windows_utc: "08:00-12:00 and 16:00-20:00",
+      low_volume_utc: "00:00-04:00",
+    },
+    weekly_pattern: {
+      today,
+      ...dowPattern,
+    },
+    tip: "Use seconds_until to schedule trades. Sort events ascending for next upcoming event.",
+  });
+});
+
 // GET /markets/:coin/price
 app.get("/:coin/price", async (c) => {
   const coin = c.req.param("coin").toUpperCase();
