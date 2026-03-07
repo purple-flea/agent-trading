@@ -558,6 +558,142 @@ v1.get("/signals", async (c) => {
   }
 });
 
+// ─── PnL Calculator (public, no auth, no cache) ───
+v1.post("/pnl/calculate", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { positions: rawPositions } = body as {
+    positions?: Array<{
+      market?: unknown;
+      side?: unknown;
+      entry_price?: unknown;
+      current_price?: unknown;
+      size_usd?: unknown;
+      leverage?: unknown;
+    }>;
+  };
+
+  if (!Array.isArray(rawPositions) || rawPositions.length === 0) {
+    return c.json({ error: "invalid_input", message: "positions must be a non-empty array" }, 400);
+  }
+  if (rawPositions.length > 20) {
+    return c.json({ error: "too_many_positions", message: "Maximum 20 positions per request" }, 400);
+  }
+
+  const results: Array<{
+    market: string;
+    side: string;
+    entry_price: number;
+    current_price: number;
+    size_usd: number;
+    leverage: number;
+    margin_usd: number;
+    pnl_usd: number;
+    pnl_pct: number;
+    liquidation_price: number;
+    margin_ratio_pct: number;
+    status: string;
+  }> = [];
+
+  for (let i = 0; i < rawPositions.length; i++) {
+    const pos = rawPositions[i];
+    const market = typeof pos.market === "string" ? pos.market.toUpperCase() : "";
+    const side = typeof pos.side === "string" ? pos.side.toLowerCase() : "";
+    const entry_price = Number(pos.entry_price);
+    const current_price = Number(pos.current_price);
+    const size_usd = Number(pos.size_usd);
+    const leverage = Number(pos.leverage);
+
+    if (!market) {
+      return c.json({ error: "invalid_position", message: `Position ${i}: market is required` }, 400);
+    }
+    if (side !== "long" && side !== "short") {
+      return c.json({ error: "invalid_position", message: `Position ${i}: side must be "long" or "short"` }, 400);
+    }
+    if (!Number.isFinite(entry_price) || entry_price <= 0) {
+      return c.json({ error: "invalid_position", message: `Position ${i}: entry_price must be a positive number` }, 400);
+    }
+    if (!Number.isFinite(current_price) || current_price <= 0) {
+      return c.json({ error: "invalid_position", message: `Position ${i}: current_price must be a positive number` }, 400);
+    }
+    if (!Number.isFinite(size_usd) || size_usd <= 0) {
+      return c.json({ error: "invalid_position", message: `Position ${i}: size_usd must be > 0` }, 400);
+    }
+    if (!Number.isFinite(leverage) || leverage < 1 || leverage > 100) {
+      return c.json({ error: "invalid_position", message: `Position ${i}: leverage must be between 1 and 100` }, 400);
+    }
+
+    // Core calculations
+    const margin_usd = size_usd / leverage;
+
+    const pnl_usd = side === "long"
+      ? size_usd * (current_price - entry_price) / entry_price
+      : size_usd * (entry_price - current_price) / entry_price;
+
+    const pnl_pct = (pnl_usd / margin_usd) * 100;
+
+    // Liquidation price includes 0.5% maintenance margin
+    const liquidation_price = side === "long"
+      ? entry_price * (1 - 1 / leverage + 0.005)
+      : entry_price * (1 + 1 / leverage - 0.005);
+
+    // Margin ratio: current equity / initial margin * 100
+    const equity = margin_usd + pnl_usd;
+    const margin_ratio_pct = (equity / margin_usd) * 100;
+
+    const status = margin_ratio_pct < 10
+      ? "danger"
+      : margin_ratio_pct < 20
+      ? "at_risk"
+      : "healthy";
+
+    results.push({
+      market,
+      side,
+      entry_price: Math.round(entry_price * 100) / 100,
+      current_price: Math.round(current_price * 100) / 100,
+      size_usd: Math.round(size_usd * 100) / 100,
+      leverage,
+      margin_usd: Math.round(margin_usd * 100) / 100,
+      pnl_usd: Math.round(pnl_usd * 100) / 100,
+      pnl_pct: Math.round(pnl_pct * 100) / 100,
+      liquidation_price: Math.round(liquidation_price * 100) / 100,
+      margin_ratio_pct: Math.round(margin_ratio_pct * 100) / 100,
+      status,
+    });
+  }
+
+  // Summary aggregates
+  const total_margin_usd = results.reduce((s, p) => s + p.margin_usd, 0);
+  const total_pnl_usd = results.reduce((s, p) => s + p.pnl_usd, 0);
+  const total_pnl_pct = total_margin_usd > 0 ? (total_pnl_usd / total_margin_usd) * 100 : 0;
+  const positions_profitable = results.filter(p => p.pnl_usd > 0).length;
+  const positions_at_risk = results.filter(p => p.status === "at_risk" || p.status === "danger").length;
+  const net_exposure_usd = results.reduce((s, p) => s + p.size_usd, 0);
+
+  const tipOptions = [
+    "Use GET /v1/risk/gauge to check current market risk before sizing positions.",
+    "Higher leverage means lower liquidation distance — check liquidation_price before opening live trades.",
+    "Diversify across multiple markets to reduce concentration risk.",
+    "POST /v1/backtest to simulate a strategy before committing real capital.",
+    "Monitor margin_ratio_pct — below 20% is at_risk, below 10% is danger.",
+  ];
+  const tip = tipOptions[Math.floor(Date.now() / 60000) % tipOptions.length];
+
+  return c.json({
+    positions: results,
+    summary: {
+      total_margin_usd: Math.round(total_margin_usd * 100) / 100,
+      total_pnl_usd: Math.round(total_pnl_usd * 100) / 100,
+      total_pnl_pct: Math.round(total_pnl_pct * 100) / 100,
+      positions_profitable,
+      positions_at_risk,
+      net_exposure_usd: Math.round(net_exposure_usd * 100) / 100,
+    },
+    tip,
+    disclaimer: "Estimates only. Actual results depend on your exchange's liquidation engine.",
+  });
+});
+
 // ─── Leaderboard (public, 60s cache) ───
 v1.get("/leaderboard", (c) => {
   c.header("Cache-Control", "public, max-age=60");
@@ -1292,6 +1428,9 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/risk/:agentId": "Public risk profile for any agent (no auth, 60s cache)",
     "GET /v1/trade/risk-calc": "Pre-trade R:R calculator (no auth) — entry, stop, target, size_usd, leverage",
   },
+  calculator: {
+    "POST /v1/pnl/calculate": "PnL + liquidation calculator (no auth) — submit up to 20 hypothetical or real positions, get back pnl_usd, pnl_pct, liquidation_price, margin_ratio_pct, status",
+  },
   referral: {
     "GET /v1/gossip": "Passive income info + live agent count (no auth)",
     "GET /v1/referral/code": "Your referral code",
@@ -1502,6 +1641,7 @@ app.get("/stats", (c) => { c.header("Cache-Control", "public, max-age=60"); retu
 app.get("/signals", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/signals", 302); });
 app.get("/oi", (c) => { c.header("Cache-Control", "public, max-age=60"); return c.redirect("/v1/markets/oi", 302); });
 app.get("/risk", (c) => c.redirect("/v1/risk/gauge", 302));
+app.get("/pnl", (c) => c.redirect("/v1/pnl/calculate", 302));
 
 const port = parseInt(process.env.PORT || "3003", 10);
 serve({ fetch: app.fetch, port }, (info) => {
