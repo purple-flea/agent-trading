@@ -3,9 +3,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { randomUUID } from "crypto";
 import { runMigrations, db } from "./db/index.js";
-import { agents, positions, trades, referralEarnings } from "./db/schema.js";
-import { sql, desc, eq } from "drizzle-orm";
+import { agents, positions, trades, referralEarnings, orders } from "./db/schema.js";
+import { sql, desc, eq, and } from "drizzle-orm";
+import { getPrice, submitMarketOrder, submitCloseOrder, calculateFee } from "./engine/hyperliquid.js";
+import { decryptKey, decryptKeyCbc } from "./engine/crypto.js";
 import authRoutes from "./routes/auth.js";
 import marketsRoutes from "./routes/markets.js";
 import tradeRoutes from "./routes/trade.js";
@@ -243,6 +246,12 @@ app.get("/health", (c) => {
     uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
     database: dbStatus,
     registered_agents: registeredAgents,
+    order_monitor: {
+      running: orderMonitorTimer !== null,
+      total_checks: orderMonitorStats.totalChecks,
+      limits_filled: orderMonitorStats.limitsFilled,
+      exits_filled: orderMonitorStats.exitsFilled,
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -1655,9 +1664,200 @@ app.get("/oi", (c) => { c.header("Cache-Control", "public, max-age=60"); return 
 app.get("/risk", (c) => c.redirect("/v1/risk/gauge", 302));
 app.get("/pnl", (c) => c.redirect("/v1/pnl/calculate", 302));
 
+// ─── Automatic Order Monitor ─────────────────────────────────────────────────
+// Checks all pending limit orders and SL/TP exit orders every 30s and executes
+// triggered ones automatically. This eliminates the need for agents to manually
+// call POST /check-limits or POST /check-exits.
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Decrypt an agent's HL signing key — returns null if not configured */
+function decryptAgentKey(agent: typeof agents.$inferSelect): string | null {
+  if (!agent.hlSigningKeyEncrypted || !agent.hlWalletAddress) return null;
+  return agent.generatedWallet === 1
+    ? decryptKeyCbc(agent.hlSigningKeyEncrypted)
+    : decryptKey(agent.hlSigningKeyEncrypted);
+}
+
+const orderMonitorStats = { lastRun: 0, limitsFilled: 0, exitsFilled: 0, errors: 0, totalChecks: 0 };
+
+async function checkPendingOrders(): Promise<void> {
+  orderMonitorStats.totalChecks++;
+  const now = Math.floor(Date.now() / 1000);
+
+  // Fetch all pending orders (limit, stop_loss, take_profit) across all agents
+  const pendingOrders = db.select().from(orders)
+    .where(eq(orders.status, "pending"))
+    .all();
+
+  if (pendingOrders.length === 0) {
+    orderMonitorStats.lastRun = now;
+    return;
+  }
+
+  // Batch-fetch prices for all unique coins
+  const coins = [...new Set(pendingOrders.map(o => o.coin))];
+  const prices: Record<string, number> = {};
+  await Promise.all(coins.map(async (coin) => {
+    try {
+      const p = await getPrice(coin);
+      if (p) prices[coin] = p;
+    } catch { /* skip unavailable */ }
+  }));
+
+  // Group orders by agent for key lookup caching
+  const agentCache = new Map<string, typeof agents.$inferSelect | null>();
+
+  for (const order of pendingOrders) {
+    const currentPrice = prices[order.coin];
+    if (!currentPrice) continue;
+
+    // Look up agent (cached per batch)
+    if (!agentCache.has(order.agentId)) {
+      agentCache.set(order.agentId, db.select().from(agents).where(eq(agents.id, order.agentId)).get() ?? null);
+    }
+    const agent = agentCache.get(order.agentId);
+    if (!agent) continue;
+
+    if (order.orderType === "limit") {
+      // Limit order: buy triggers when price <= limit, sell triggers when price >= limit
+      const triggered =
+        (order.side === "buy" && currentPrice <= order.price!) ||
+        (order.side === "sell" && currentPrice >= order.price!);
+      if (!triggered) continue;
+
+      try {
+        const signingKey = decryptAgentKey(agent);
+        if (signingKey) {
+          const fill = await submitMarketOrder(
+            signingKey, agent.hlWalletAddress!, order.coin,
+            order.side === "buy", order.sizeUsd, order.leverage, agent.tier
+          );
+          const fees = calculateFee(fill.sizeUsd, agent.tier);
+          const posId = `pos_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+          const tradeId = `trd_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+          const posSide = fill.side === "buy" ? "long" : "short";
+          db.insert(positions).values({
+            id: posId, agentId: order.agentId, coin: fill.coin, side: posSide,
+            sizeUsd: fill.sizeUsd, entryPrice: fill.avgPrice, leverage: order.leverage,
+            marginUsed: fill.marginRequired, liquidationPrice: fill.liquidationPrice, status: "open",
+          }).run();
+          db.update(orders).set({ status: "filled", fillPrice: fill.avgPrice, positionId: posId, filledAt: now }).where(eq(orders.id, order.id)).run();
+          db.insert(trades).values({
+            id: tradeId, agentId: order.agentId, orderId: order.id, coin: fill.coin,
+            side: fill.side, sizeUsd: fill.sizeUsd, price: fill.avgPrice, fee: fees.totalFee,
+          }).run();
+          console.log(`[order-monitor] Limit FILLED: ${order.coin} ${posSide} @$${fill.avgPrice} (agent ${order.agentId.slice(0, 8)}…)`);
+        } else {
+          // No HL wallet — simulate fill at market price
+          db.update(orders).set({ status: "filled", fillPrice: currentPrice, filledAt: now }).where(eq(orders.id, order.id)).run();
+          console.log(`[order-monitor] Limit FILLED (sim): ${order.coin} ${order.side} @$${currentPrice} (agent ${order.agentId.slice(0, 8)}…)`);
+        }
+        orderMonitorStats.limitsFilled++;
+      } catch (err) {
+        orderMonitorStats.errors++;
+        console.error(`[order-monitor] Limit order ${order.id} failed:`, err);
+      }
+
+    } else if (order.orderType === "stop_loss" || order.orderType === "take_profit") {
+      // SL/TP: need the linked position
+      if (!order.positionId) continue;
+      const position = db.select().from(positions).where(eq(positions.id, order.positionId)).get();
+      if (!position || position.status !== "open") {
+        // Position already closed — cancel the orphaned order
+        db.update(orders).set({ status: "cancelled" }).where(eq(orders.id, order.id)).run();
+        continue;
+      }
+
+      let shouldTrigger = false;
+      if (order.orderType === "stop_loss") {
+        shouldTrigger = position.side === "long"
+          ? currentPrice <= order.price!
+          : currentPrice >= order.price!;
+      } else {
+        shouldTrigger = position.side === "long"
+          ? currentPrice >= order.price!
+          : currentPrice <= order.price!;
+      }
+      if (!shouldTrigger) continue;
+
+      try {
+        const signingKey = decryptAgentKey(agent);
+        let closePrice = currentPrice;
+        if (signingKey) {
+          const fill = await submitMarketOrder(
+            signingKey, agent.hlWalletAddress!, order.coin,
+            order.side === "buy", order.sizeUsd, order.leverage, agent.tier
+          );
+          closePrice = fill.avgPrice;
+        }
+        const pnl = position.side === "long"
+          ? (closePrice - position.entryPrice) / position.entryPrice * position.sizeUsd
+          : (position.entryPrice - closePrice) / position.entryPrice * position.sizeUsd;
+
+        db.update(positions).set({ status: "closed", unrealizedPnl: round2(pnl), closedAt: now }).where(eq(positions.id, order.positionId!)).run();
+        db.update(orders).set({ status: "filled", fillPrice: closePrice, filledAt: now }).where(eq(orders.id, order.id)).run();
+
+        // Also cancel any other pending SL/TP on the same position (e.g. if SL fires, cancel TP)
+        db.update(orders).set({ status: "cancelled" })
+          .where(and(
+            eq(orders.positionId, order.positionId!),
+            eq(orders.status, "pending"),
+          )).run();
+
+        const label = order.orderType === "stop_loss" ? "SL" : "TP";
+        console.log(`[order-monitor] ${label} FILLED: ${order.coin} @$${closePrice} PnL ${pnl >= 0 ? "+" : ""}$${round2(pnl)} (agent ${order.agentId.slice(0, 8)}…)`);
+        orderMonitorStats.exitsFilled++;
+      } catch (err) {
+        orderMonitorStats.errors++;
+        console.error(`[order-monitor] ${order.orderType} order ${order.id} failed:`, err);
+      }
+    }
+  }
+
+  orderMonitorStats.lastRun = now;
+}
+
+const ORDER_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+let orderMonitorTimer: ReturnType<typeof setInterval> | null = null;
+
+function startOrderMonitor(): void {
+  if (orderMonitorTimer) return;
+  orderMonitorTimer = setInterval(() => {
+    checkPendingOrders().catch(err => {
+      orderMonitorStats.errors++;
+      console.error("[order-monitor] Unhandled error:", err);
+    });
+  }, ORDER_CHECK_INTERVAL_MS);
+  console.log(`[order-monitor] Started — checking pending orders every ${ORDER_CHECK_INTERVAL_MS / 1000}s`);
+}
+
+// ─── GET /v1/order-monitor — public status of the background monitor ───
+app.get("/v1/order-monitor", (c) => {
+  const pendingCount = db.select({ count: sql<number>`count(*)` }).from(orders)
+    .where(eq(orders.status, "pending")).get();
+
+  return c.json({
+    running: orderMonitorTimer !== null,
+    interval_seconds: ORDER_CHECK_INTERVAL_MS / 1000,
+    total_checks: orderMonitorStats.totalChecks,
+    limits_filled: orderMonitorStats.limitsFilled,
+    exits_filled: orderMonitorStats.exitsFilled,
+    errors: orderMonitorStats.errors,
+    pending_orders: pendingCount?.count ?? 0,
+    last_check: orderMonitorStats.lastRun
+      ? new Date(orderMonitorStats.lastRun * 1000).toISOString()
+      : null,
+    description: "Automatic background monitor checks all pending limit orders and SL/TP exit orders every 30s and executes triggered ones.",
+  });
+});
+
 const port = parseInt(process.env.PORT || "3003", 10);
 serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`Agent Trading v2 running on http://localhost:${info.port}`);
+  console.log(`Agent Trading v3 running on http://localhost:${info.port}`);
+  startOrderMonitor();
 });
 
 export default app;
