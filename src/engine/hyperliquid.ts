@@ -549,6 +549,80 @@ async function getUserFills(walletAddress: string, oid: number, dex?: string): P
   }
 }
 
+// ─── Order book ───
+
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+  total: number; // cumulative size
+  notional: number; // price × size in USD
+}
+
+export interface OrderBook {
+  coin: string;
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  spread: number;
+  spreadPct: number;
+  midPrice: number;
+  timestamp: number;
+}
+
+/** Fetch L2 order book from Hyperliquid */
+export async function getOrderBook(coin: string, depth: number = 20): Promise<OrderBook | null> {
+  const resolved = await resolveCoin(coin);
+  if (!resolved) return null;
+
+  const body: any = { type: "l2Book", coin: resolved.canonical };
+  if (resolved.dex === "xyz") body.dex = "xyz";
+
+  const res = await fetch(`${HL_API}/info`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json() as any;
+  if (!data?.levels || data.levels.length < 2) return null;
+
+  const rawBids: Array<{ px: string; sz: string; n: number }> = data.levels[0] ?? [];
+  const rawAsks: Array<{ px: string; sz: string; n: number }> = data.levels[1] ?? [];
+
+  const mapLevels = (levels: typeof rawBids): OrderBookLevel[] => {
+    let cumulative = 0;
+    return levels.slice(0, depth).map(l => {
+      const price = parseFloat(l.px);
+      const size = parseFloat(l.sz);
+      cumulative += size;
+      return {
+        price,
+        size,
+        total: round8(cumulative),
+        notional: round2(price * size),
+      };
+    });
+  };
+
+  const bids = mapLevels(rawBids);
+  const asks = mapLevels(rawAsks);
+
+  const bestBid = bids[0]?.price ?? 0;
+  const bestAsk = asks[0]?.price ?? 0;
+  const midPrice = bestBid && bestAsk ? round8((bestBid + bestAsk) / 2) : 0;
+  const spread = bestAsk && bestBid ? round8(bestAsk - bestBid) : 0;
+  const spreadPct = midPrice > 0 ? round8((spread / midPrice) * 100) : 0;
+
+  return {
+    coin: resolved.canonical,
+    bids,
+    asks,
+    spread,
+    spreadPct,
+    midPrice,
+    timestamp: Date.now(),
+  };
+}
+
 // ─── Utilities ───
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }

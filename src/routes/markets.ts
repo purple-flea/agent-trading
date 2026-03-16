@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { getMarkets, getMarketsByCategory, getAllPrices, getPrice, resolveCoin, calculateFee } from "../engine/hyperliquid.js";
+import { getMarkets, getMarketsByCategory, getAllPrices, getPrice, resolveCoin, calculateFee, getOrderBook } from "../engine/hyperliquid.js";
 import { db } from "../db/index.js";
 import { positions } from "../db/schema.js";
 import { eq, sql } from "drizzle-orm";
@@ -887,6 +887,55 @@ app.get("/calendar", (c) => {
     },
     tip: "Use seconds_until to schedule trades. Sort events ascending for next upcoming event.",
   });
+});
+
+// GET /markets/:coin/orderbook — L2 order book depth from Hyperliquid (public, 5s cache)
+app.get("/:coin/orderbook", async (c) => {
+  const coin = c.req.param("coin").toUpperCase();
+  const depth = Math.min(Math.max(parseInt(c.req.query("depth") || "20", 10), 1), 50);
+
+  try {
+    const book = await getOrderBook(coin, depth);
+    if (!book) {
+      return c.json({ error: "market_not_found", coin, suggestion: "GET /v1/markets for all available markets" }, 404);
+    }
+
+    const totalBidLiquidity = book.bids.reduce((s, l) => s + l.notional, 0);
+    const totalAskLiquidity = book.asks.reduce((s, l) => s + l.notional, 0);
+    const imbalance = totalBidLiquidity + totalAskLiquidity > 0
+      ? Math.round((totalBidLiquidity - totalAskLiquidity) / (totalBidLiquidity + totalAskLiquidity) * 10000) / 10000
+      : 0;
+
+    c.header("Cache-Control", "public, max-age=5");
+    return c.json({
+      coin: book.coin,
+      ticker: book.coin.replace("xyz:", ""),
+      mid_price: book.midPrice,
+      spread: book.spread,
+      spread_pct: book.spreadPct,
+      spread_quality: book.spreadPct < 0.01 ? "excellent" : book.spreadPct < 0.05 ? "good" : book.spreadPct < 0.15 ? "fair" : "wide",
+      bids: book.bids,
+      asks: book.asks,
+      liquidity: {
+        total_bid_usd: Math.round(totalBidLiquidity * 100) / 100,
+        total_ask_usd: Math.round(totalAskLiquidity * 100) / 100,
+        imbalance,
+        imbalance_direction: imbalance > 0.1 ? "buy_heavy" : imbalance < -0.1 ? "sell_heavy" : "balanced",
+        interpretation: imbalance > 0.1
+          ? "More buy-side liquidity — potential support below. May indicate accumulation."
+          : imbalance < -0.1
+          ? "More sell-side liquidity — potential resistance above. May indicate distribution."
+          : "Balanced order book — no strong directional bias from liquidity.",
+      },
+      depth_levels: depth,
+      timestamp: new Date(book.timestamp).toISOString(),
+      tip: "Use spread_pct to gauge execution cost. Lower = better fills on market orders.",
+      trade: `POST /v1/trade/open { "coin": "${book.coin.replace("xyz:", "")}", "side": "long", "size_usd": 100 }`,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Order book unavailable";
+    return c.json({ error: "orderbook_error", message }, 503);
+  }
 });
 
 // GET /markets/:coin/price

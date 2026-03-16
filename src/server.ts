@@ -1396,6 +1396,7 @@ v1.get("/docs", (c) => c.json({
     "GET /v1/markets/signals": "Top 5 crypto + top 5 RWA by leverage score (best opportunities)",
     "GET /v1/markets/:coin": "Single market details + fee examples",
     "GET /v1/markets/:coin/price": "Current price",
+    "GET /v1/markets/:coin/orderbook": "L2 order book depth — bids, asks, spread, liquidity imbalance",
   },
   trading: {
     "POST /v1/trade/open": "Open REAL position { coin: 'TSLA', side: 'long', size_usd: 1000, leverage: 5 }",
@@ -1538,6 +1539,17 @@ app.get("/openapi.json", (c) => c.json({
         security: [],
         parameters: [{ name: "coin", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Current price" } },
+      },
+    },
+    "/v1/markets/{coin}/orderbook": {
+      get: {
+        summary: "L2 order book depth — bids, asks, spread, liquidity analysis",
+        security: [],
+        parameters: [
+          { name: "coin", in: "path", required: true, schema: { type: "string", example: "BTC" } },
+          { name: "depth", in: "query", required: false, schema: { type: "integer", default: 20, minimum: 1, maximum: 50 } },
+        ],
+        responses: { "200": { description: "Order book with spread analysis and liquidity imbalance" } },
       },
     },
     "/v1/trade/open": {
