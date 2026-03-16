@@ -93,7 +93,8 @@ try {
 } catch {}
 
 // Auto-migration for copy trading
-sqlite.exec(`
+try {
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS copy_subscriptions (
   id TEXT PRIMARY KEY,
   follower_id TEXT NOT NULL REFERENCES agents(id),
@@ -118,9 +119,11 @@ CREATE INDEX IF NOT EXISTS idx_copy_sub_active ON copy_subscriptions(active);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_sub ON copy_trades(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_orig ON copy_trades(original_position_id);
 `);
+} catch {}
 
 // Auto-migration for trade journal
-sqlite.exec(`
+try {
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS trade_notes (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -134,9 +137,11 @@ CREATE TABLE IF NOT EXISTS trade_notes (
 CREATE INDEX IF NOT EXISTS idx_notes_agent ON trade_notes(agent_id);
 CREATE INDEX IF NOT EXISTS idx_notes_position ON trade_notes(position_id);
 `);
+} catch {}
 
 // Auto-migration for price alerts
-sqlite.exec(`
+try {
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS price_alerts (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -151,9 +156,11 @@ CREATE TABLE IF NOT EXISTS price_alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_agent ON price_alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON price_alerts(active);
 `);
+} catch {}
 
 // Auto-migration for watchlist
-sqlite.exec(`
+try {
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS watchlist (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -163,3 +170,4 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 CREATE INDEX IF NOT EXISTS idx_watchlist_agent ON watchlist(agent_id);
 `);
+} catch {}
