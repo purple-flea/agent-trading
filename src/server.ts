@@ -6,7 +6,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { randomUUID } from "crypto";
 import { runMigrations, db } from "./db/index.js";
 import { agents, positions, trades, referralEarnings, orders } from "./db/schema.js";
-import { sql, desc, eq, and } from "drizzle-orm";
+import { sql, desc, eq, and, ne } from "drizzle-orm";
 import { getPrice, submitMarketOrder, submitCloseOrder, calculateFee } from "./engine/hyperliquid.js";
 import { decryptKey, decryptKeyCbc } from "./engine/crypto.js";
 import authRoutes from "./routes/auth.js";
@@ -966,9 +966,8 @@ v1.post("/trade/close-all", async (c) => {
       db.update(positions).set({
         status: "closed",
         closedAt: Math.floor(Date.now() / 1000),
-        closingPrice: closePrice,
-        realizedPnl: pnl,
-      } as Partial<typeof positions.$inferSelect>).where(eq(positions.id, pos.id)).run();
+        unrealizedPnl: pnl,
+      }).where(eq(positions.id, pos.id)).run();
 
       results.push({ position_id: pos.id, coin: pos.coin, status: "closed", pnl_usd: pnl });
     } catch {
@@ -1787,11 +1786,10 @@ async function checkPendingOrders(): Promise<void> {
         const signingKey = decryptAgentKey(agent);
         let closePrice = currentPrice;
         if (signingKey) {
-          const fill = await submitMarketOrder(
-            signingKey, agent.hlWalletAddress!, order.coin,
-            order.side === "buy", order.sizeUsd, order.leverage, agent.tier
+          const close = await submitCloseOrder(
+            signingKey, agent.hlWalletAddress!, order.coin, agent.tier
           );
-          closePrice = fill.avgPrice;
+          closePrice = close.avgPrice;
         }
         const pnl = position.side === "long"
           ? (closePrice - position.entryPrice) / position.entryPrice * position.sizeUsd
@@ -1805,6 +1803,7 @@ async function checkPendingOrders(): Promise<void> {
           .where(and(
             eq(orders.positionId, order.positionId!),
             eq(orders.status, "pending"),
+            ne(orders.id, order.id),
           )).run();
 
         const label = order.orderType === "stop_loss" ? "SL" : "TP";
